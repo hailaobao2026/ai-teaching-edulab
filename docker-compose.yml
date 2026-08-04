@@ -1,0 +1,59 @@
+services:
+  api:
+    build: .
+    ports:
+      - "3002:3002"
+    environment:
+      - NODE_ENV=production
+      - USE_MYSQL=true
+      - SEED_DEMO_ACCOUNTS=false
+      - MYSQL_HOST=mysql
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=${MYSQL_ROOT_PASSWORD:-}
+      - MYSQL_DATABASE=ai_teaching_edulab
+      - PYTHON_BIN=python3
+      - LESSON_ARTIFACTS_ROOT=./server/uploads/lessons
+    volumes:
+      - lesson_artifacts:/app/server/uploads/lessons
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["node", "server/workers/lessonWorker.js"]
+    environment:
+      - NODE_ENV=production
+      - USE_MYSQL=true
+      - SEED_DEMO_ACCOUNTS=false
+      - MYSQL_HOST=mysql
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=${MYSQL_ROOT_PASSWORD:-}
+      - MYSQL_DATABASE=ai_teaching_edulab
+      - PYTHON_BIN=python3
+      - LESSON_ARTIFACTS_ROOT=./server/uploads/lessons
+    volumes:
+      - lesson_artifacts:/app/server/uploads/lessons
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-}
+      MYSQL_DATABASE: ai_teaching_edulab
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  lesson_artifacts:

@@ -1,0 +1,31 @@
+{
+  "name": "ai-teaching-edulab",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node node_modules/vite/bin/vite.js",
+    "dev:server": "npm --prefix server run dev",
+    "dev:worker": "npm --prefix server run worker",
+    "dev:all": "node node_modules/concurrently/dist/bin/concurrently.js \"npm run dev:server\" \"npm run dev:worker\" \"npm run dev\"",
+    "build": "node node_modules/vite/bin/vite.js build",
+    "preview": "node node_modules/vite/bin/vite.js preview",
+    "test": "npm --prefix server test",
+    "compose:up": "docker compose up -d",
+    "compose:down": "docker compose down"
+  },
+  "dependencies": {
+    "@wy51ai/edulab": "^0.1.8",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0"
+  }
+}
