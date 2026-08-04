@@ -36,7 +36,20 @@
 
 **推荐在线播放方式**：
 1. 本地双击 `server/uploads/lessons/<lesson-id>/index.html`
+
 2. 或通过 `/lessons/:id/view` 接口 iframe 嵌入
+
+   化学-电解水
+
+![bg7o9-3pdxq](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Obsidian/bg7o9-3pdxq.gif)
+
+  立体几何
+
+   ![1oxa1-q03ki](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Obsidian/1oxa1-q03ki.gif)
+
+  納于氯气
+
+![9biko-gmydr](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Obsidian/9biko-gmydr.gif)
 
 ### 项目介绍
 
