@@ -36,10 +36,19 @@ const memory = {
   lessons: [],
   assets: [],
   catalog: [],
+  aiQuota: [],
+  aiImageDrafts: [],
   config: {
     worker_concurrency: process.env.WORKER_CONCURRENCY || '1',
     python_bin: process.env.PYTHON_BIN || 'python3',
-    lesson_artifacts_root: process.env.LESSON_ARTIFACTS_ROOT || join(__dirname, 'uploads', 'lessons')
+    lesson_artifacts_root: process.env.LESSON_ARTIFACTS_ROOT || join(__dirname, 'uploads', 'lessons'),
+    ai_enabled: process.env.AI_ENABLED || 'true',
+    ai_allow_roles: process.env.AI_ALLOW_ROLES || 'student,teacher,admin',
+    ai_quota_student: process.env.AI_QUOTA_STUDENT || '10',
+    ai_quota_teacher: process.env.AI_QUOTA_TEACHER || '50',
+    ai_quota_admin: process.env.AI_QUOTA_ADMIN || '200',
+    ai_image_confirm_required: 'true',
+    ai_max_repair_attempts: process.env.AI_MAX_REPAIR_ATTEMPTS || '3'
   }
 };
 
@@ -79,7 +88,7 @@ function loadMemory() {
     console.warn('memory load failed', e.message);
   }
   if (!memory.config || typeof memory.config !== 'object') memory.config = {};
-  for (const arr of ['users', 'sessions', 'jobs', 'lessons', 'assets', 'catalog']) {
+  for (const arr of ['users', 'sessions', 'jobs', 'lessons', 'assets', 'catalog', 'aiQuota', 'aiImageDrafts']) {
     if (!Array.isArray(memory[arr])) memory[arr] = [];
   }
 }
@@ -169,8 +178,44 @@ async function initMysqlSchema() {
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   for (const statement of [
     "ALTER TABLE generation_jobs ADD COLUMN worker_token VARCHAR(128) NULL",
-    "ALTER TABLE generation_jobs ADD COLUMN lease_until DATETIME NULL"
-  ]) { try { await pool.query(statement); } catch (error) { if (error.code !== 'ER_DUP_FIELDNAME') throw error; } }
+    "ALTER TABLE generation_jobs ADD COLUMN lease_until DATETIME NULL",
+    "ALTER TABLE generation_jobs ADD COLUMN kind VARCHAR(16) NOT NULL DEFAULT 'fixed'",
+    "ALTER TABLE generation_jobs ADD COLUMN input_mode VARCHAR(32) NOT NULL DEFAULT 'catalog'",
+    "ALTER TABLE generation_jobs ADD COLUMN source_text MEDIUMTEXT NULL",
+    "ALTER TABLE generation_jobs ADD COLUMN source_asset_id VARCHAR(64) NULL",
+    "ALTER TABLE generation_jobs ADD COLUMN draft_id VARCHAR(64) NULL",
+    "ALTER TABLE generation_jobs ADD COLUMN skill_hint VARCHAR(64) NULL",
+    "ALTER TABLE generation_jobs ADD COLUMN idempotency_key VARCHAR(128) NULL",
+    "ALTER TABLE generation_jobs ADD COLUMN error_code VARCHAR(64) NULL",
+    "ALTER TABLE generation_jobs ADD COLUMN spec JSON NULL",
+    "ALTER TABLE generation_jobs ADD COLUMN validation_trace JSON NULL",
+    "ALTER TABLE generation_jobs ADD COLUMN molecule_extensions JSON NULL",
+    "ALTER TABLE generation_jobs ADD COLUMN ai_meta JSON NULL",
+    "CREATE INDEX idx_jobs_idempotency ON generation_jobs (user_id, idempotency_key)"
+  ]) { try { await pool.query(statement); } catch (error) { if (error.code !== 'ER_DUP_FIELDNAME' && error.code !== 'ER_DUP_KEYNAME') throw error; } }
+  await pool.query(`CREATE TABLE IF NOT EXISTS ai_daily_quota (
+    user_id VARCHAR(64) NOT NULL,
+    usage_date CHAR(10) NOT NULL,
+    ai_jobs_created INT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, usage_date)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS ai_image_drafts (
+    id VARCHAR(64) PRIMARY KEY,
+    user_id VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending_confirm',
+    skill_hint VARCHAR(64) DEFAULT '',
+    asset_path VARCHAR(512) DEFAULT '',
+    confidence DOUBLE DEFAULT NULL,
+    editable_json JSON,
+    raw_recognition JSON,
+    warnings_json JSON,
+    confirmed_job_id VARCHAR(64) NULL,
+    expires_at DATETIME NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_drafts_user (user_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   await pool.query(`CREATE TABLE IF NOT EXISTS lessons (
     id VARCHAR(64) PRIMARY KEY,
     user_id VARCHAR(64) NOT NULL,
@@ -393,41 +438,90 @@ export async function deleteUserSessions(userId) {
 
 // ---------- Jobs ----------
 
-export async function createJob({ userId, skillId, problemType, params, title }) {
+export async function createJob({
+  userId,
+  skillId,
+  problemType,
+  params,
+  title,
+  kind = 'fixed',
+  inputMode = 'catalog',
+  sourceText = '',
+  sourceAssetId = null,
+  draftId = null,
+  skillHint = null,
+  idempotencyKey = null,
+  aiMeta = null,
+  spec = null
+}) {
   const job = {
     id: generateId('job'),
     user_id: userId,
     status: 'queued',
     progress: 0,
     current_stage: '排队中',
-    skill_id: skillId,
-    problem_type: problemType,
+    skill_id: skillId || '',
+    problem_type: problemType || (kind === 'ai' ? 'ai_dynamic' : ''),
     params: params || {},
     title: title || '',
     error_message: '',
+    error_code: '',
     result_lesson_id: null,
     worker_token: null,
     lease_until: null,
+    kind: kind === 'ai' ? 'ai' : 'fixed',
+    input_mode: inputMode || (kind === 'ai' ? 'text' : 'catalog'),
+    source_text: sourceText || '',
+    source_asset_id: sourceAssetId || null,
+    draft_id: draftId || null,
+    skill_hint: skillHint || null,
+    idempotency_key: idempotencyKey || null,
+    spec: spec || null,
+    validation_trace: null,
+    molecule_extensions: null,
+    ai_meta: aiMeta || null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
   };
   if (useMysql) {
     await pool.query(
-      `INSERT INTO generation_jobs (id, user_id, status, progress, current_stage, skill_id, problem_type, params, title, worker_token, lease_until)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
-      [job.id, job.user_id, job.status, job.progress, job.current_stage, job.skill_id, job.problem_type, JSON.stringify(job.params), job.title]
+      `INSERT INTO generation_jobs (
+         id, user_id, status, progress, current_stage, skill_id, problem_type, params, title,
+         worker_token, lease_until, kind, input_mode, source_text, source_asset_id, draft_id,
+         skill_hint, idempotency_key, error_code, spec, validation_trace, molecule_extensions, ai_meta
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        job.id, job.user_id, job.status, job.progress, job.current_stage, job.skill_id, job.problem_type,
+        JSON.stringify(job.params), job.title, job.kind, job.input_mode, job.source_text, job.source_asset_id,
+        job.draft_id, job.skill_hint, job.idempotency_key, job.error_code,
+        job.spec ? JSON.stringify(job.spec) : null,
+        null,
+        null,
+        job.ai_meta ? JSON.stringify(job.ai_meta) : null
+      ]
     );
   } else {
     const lockFd = acquireMemoryLock();
     try { loadMemory(); memory.jobs.unshift(job); saveMemory(lockFd); } finally { releaseMemoryLock(lockFd); }
   }
-  return job;
+  return mapJob(job);
+}
+
+function parseJsonField(value, fallback) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'object') return value;
+  if (typeof value === 'string') {
+    try { return JSON.parse(value); } catch { return fallback; }
+  }
+  return fallback;
 }
 
 function mapJob(row) {
   if (!row) return null;
-  let params = row.params;
-  if (typeof params === 'string') { try { params = JSON.parse(params); } catch { params = {}; } }
+  const params = parseJsonField(row.params, {});
+  const publicError = row.error_message
+    ? (row.kind === 'ai' || row.error_code ? String(row.error_message) : '课件生成失败，请稍后重试')
+    : '';
   return {
     id: row.id,
     userId: row.user_id,
@@ -438,10 +532,22 @@ function mapJob(row) {
     problemType: row.problem_type,
     params,
     title: row.title,
-    errorMessage: row.error_message ? '课件生成失败，请稍后重试' : '',
+    errorMessage: publicError,
+    errorCode: row.error_code || '',
     resultLessonId: row.result_lesson_id,
     workerToken: row.worker_token || null,
     leaseUntil: row.lease_until || null,
+    kind: row.kind || 'fixed',
+    inputMode: row.input_mode || 'catalog',
+    sourceText: row.source_text || '',
+    sourceAssetId: row.source_asset_id || null,
+    draftId: row.draft_id || null,
+    skillHint: row.skill_hint || null,
+    idempotencyKey: row.idempotency_key || null,
+    spec: parseJsonField(row.spec, null),
+    validationTrace: parseJsonField(row.validation_trace, null),
+    moleculeExtensions: parseJsonField(row.molecule_extensions, null),
+    aiMeta: parseJsonField(row.ai_meta, null),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -811,3 +917,196 @@ export async function setProblemCatalogEntry(skillId, problemType, enabled) {
   else memory.catalog.push({ skill_id: skillId, problem_type: problemType, enabled: enabled ? 1 : 0, updated_at: new Date().toISOString() });
   saveMemory();
 }
+
+// ---------- AI quota / drafts / idempotency (M0) ----------
+
+export async function getAiDailyUsage(userId, usageDate) {
+  memReload();
+  if (useMysql) {
+    const [rows] = await pool.query('SELECT ai_jobs_created FROM ai_daily_quota WHERE user_id = ? AND usage_date = ?', [userId, usageDate]);
+    return rows[0]?.ai_jobs_created || 0;
+  }
+  const row = memory.aiQuota.find(item => item.user_id === userId && item.usage_date === usageDate);
+  return row?.ai_jobs_created || 0;
+}
+
+export async function incrementAiDailyUsage(userId, usageDate) {
+  memReload();
+  if (useMysql) {
+    await pool.query(
+      `INSERT INTO ai_daily_quota (user_id, usage_date, ai_jobs_created) VALUES (?, ?, 1)
+       ON DUPLICATE KEY UPDATE ai_jobs_created = ai_jobs_created + 1`,
+      [userId, usageDate]
+    );
+    return getAiDailyUsage(userId, usageDate);
+  }
+  const lockFd = acquireMemoryLock();
+  try {
+    loadMemory();
+    let row = memory.aiQuota.find(item => item.user_id === userId && item.usage_date === usageDate);
+    if (!row) {
+      row = { user_id: userId, usage_date: usageDate, ai_jobs_created: 0, updated_at: new Date().toISOString() };
+      memory.aiQuota.push(row);
+    }
+    row.ai_jobs_created += 1;
+    row.updated_at = new Date().toISOString();
+    saveMemory(lockFd);
+    return row.ai_jobs_created;
+  } finally { releaseMemoryLock(lockFd); }
+}
+
+export async function findJobByIdempotencyKey(userId, idempotencyKey) {
+  if (!idempotencyKey) return null;
+  memReload();
+  if (useMysql) {
+    const [rows] = await pool.query(
+      'SELECT * FROM generation_jobs WHERE user_id = ? AND idempotency_key = ? ORDER BY created_at DESC LIMIT 1',
+      [userId, idempotencyKey]
+    );
+    return mapJob(rows[0]);
+  }
+  const row = memory.jobs.find(j => j.user_id === userId && j.idempotency_key === idempotencyKey);
+  return mapJob(row || null);
+}
+
+export async function updateJobAiFields(id, fields = {}) {
+  memReload();
+  const allowed = ['spec', 'validation_trace', 'molecule_extensions', 'ai_meta', 'skill_id', 'problem_type', 'error_code', 'source_text', 'skill_hint'];
+  if (useMysql) {
+    const sets = [];
+    const vals = [];
+    for (const key of allowed) {
+      if (!(key in fields)) continue;
+      const column = key;
+      let value = fields[key];
+      if (['spec', 'validation_trace', 'molecule_extensions', 'ai_meta'].includes(key)) {
+        value = value == null ? null : JSON.stringify(value);
+      }
+      sets.push(`${column} = ?`);
+      vals.push(value);
+    }
+    if (!sets.length) return getJob(id);
+    vals.push(id);
+    await pool.query(`UPDATE generation_jobs SET ${sets.join(', ')}, updated_at = NOW() WHERE id = ?`, vals);
+    return getJob(id);
+  }
+  const lockFd = acquireMemoryLock();
+  try {
+    loadMemory();
+    const job = memory.jobs.find(j => j.id === id);
+    if (!job) return null;
+    for (const key of allowed) {
+      if (!(key in fields)) continue;
+      job[key] = fields[key];
+    }
+    job.updated_at = new Date().toISOString();
+    saveMemory(lockFd);
+    return mapJob(job);
+  } finally { releaseMemoryLock(lockFd); }
+}
+
+export async function createAiImageDraft({ userId, skillHint = '', assetPath = '', editable = {}, rawRecognition = null, confidence = null, warnings = [], ttlHours = 24 }) {
+  const draft = {
+    id: generateId('draft'),
+    user_id: userId,
+    status: 'pending_confirm',
+    skill_hint: skillHint || '',
+    asset_path: assetPath || '',
+    confidence,
+    editable_json: editable || {},
+    raw_recognition: rawRecognition,
+    warnings_json: warnings || [],
+    confirmed_job_id: null,
+    expires_at: new Date(Date.now() + ttlHours * 3600_000).toISOString(),
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+  if (useMysql) {
+    await pool.query(
+      `INSERT INTO ai_image_drafts (id, user_id, status, skill_hint, asset_path, confidence, editable_json, raw_recognition, warnings_json, confirmed_job_id, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+      [draft.id, draft.user_id, draft.status, draft.skill_hint, draft.asset_path, draft.confidence,
+        JSON.stringify(draft.editable_json), draft.raw_recognition ? JSON.stringify(draft.raw_recognition) : null,
+        JSON.stringify(draft.warnings_json), draft.expires_at]
+    );
+  } else {
+    const lockFd = acquireMemoryLock();
+    try { loadMemory(); memory.aiImageDrafts.unshift(draft); saveMemory(lockFd); } finally { releaseMemoryLock(lockFd); }
+  }
+  return mapAiDraft(draft);
+}
+
+function mapAiDraft(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    userId: row.user_id,
+    status: row.status,
+    skillHint: row.skill_hint || '',
+    assetPath: row.asset_path || '',
+    confidence: row.confidence,
+    editable: parseJsonField(row.editable_json, {}),
+    rawRecognition: parseJsonField(row.raw_recognition, null),
+    warnings: parseJsonField(row.warnings_json, []),
+    confirmedJobId: row.confirmed_job_id || null,
+    expiresAt: row.expires_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+export async function getAiImageDraft(id) {
+  memReload();
+  if (useMysql) {
+    const [rows] = await pool.query('SELECT * FROM ai_image_drafts WHERE id = ?', [id]);
+    return mapAiDraft(rows[0]);
+  }
+  return mapAiDraft(memory.aiImageDrafts.find(d => d.id === id) || null);
+}
+
+export async function updateAiImageDraft(id, patch = {}) {
+  memReload();
+  if (useMysql) {
+    const sets = [];
+    const vals = [];
+    const map = {
+      status: 'status',
+      skillHint: 'skill_hint',
+      editable: 'editable_json',
+      warnings: 'warnings_json',
+      confirmedJobId: 'confirmed_job_id',
+      confidence: 'confidence',
+      assetPath: 'asset_path',
+      rawRecognition: 'raw_recognition'
+    };
+    for (const [k, col] of Object.entries(map)) {
+      if (!(k in patch)) continue;
+      let value = patch[k];
+      if (k === 'editable' || k === 'warnings' || k === 'rawRecognition') value = value == null ? null : JSON.stringify(value ?? (k === 'warnings' ? [] : {}));
+      sets.push(`${col} = ?`);
+      vals.push(value);
+    }
+    if (!sets.length) return getAiImageDraft(id);
+    vals.push(id);
+    await pool.query(`UPDATE ai_image_drafts SET ${sets.join(', ')}, updated_at = NOW() WHERE id = ?`, vals);
+    return getAiImageDraft(id);
+  }
+  const lockFd = acquireMemoryLock();
+  try {
+    loadMemory();
+    const draft = memory.aiImageDrafts.find(d => d.id === id);
+    if (!draft) return null;
+    if ('status' in patch) draft.status = patch.status;
+    if ('skillHint' in patch) draft.skill_hint = patch.skillHint;
+    if ('editable' in patch) draft.editable_json = patch.editable;
+    if ('warnings' in patch) draft.warnings_json = patch.warnings;
+    if ('confirmedJobId' in patch) draft.confirmed_job_id = patch.confirmedJobId;
+    if ('confidence' in patch) draft.confidence = patch.confidence;
+    if ('assetPath' in patch) draft.asset_path = patch.assetPath;
+    if ('rawRecognition' in patch) draft.raw_recognition = patch.rawRecognition;
+    draft.updated_at = new Date().toISOString();
+    saveMemory(lockFd);
+    return mapAiDraft(draft);
+  } finally { releaseMemoryLock(lockFd); }
+}
+

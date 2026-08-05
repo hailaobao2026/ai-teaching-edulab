@@ -1,140 +1,183 @@
-# Findings & Decisions
+# Findings: LLM 动态生成教学课件（化学 + 数学）
 
-## Requirements
+## 1. 用户诉求与决策总表
 
-### 核心需求
-- 将 wy51ai/edulab 的三大教学技能封装为 Web 管理系统
-- 框架参考 ai-teaching-video-platform 的全栈架构
-- 用户可通过浏览器提交生成任务、预览交互课件、管理课件库
-- 完整的用户权限、任务队列、管理后台
+### 1.1 原始诉求
+固定题型扩展靠改代码；希望 LLM 动态生成化学与数学课件；先规划后实现。
 
-### 功能范围
-- 立体几何（edu-solid-geometry）：正方体线面角、长方体体积、随机出题
-- 解析几何（edu-analytic-geometry）：椭圆数量积范围、弦长范围、面积最值、斜率积定值、抛物线焦点弦定值、双曲线离心率范围
-- 化学反应（edu-chem-reaction）：甲烷燃烧、氢气燃烧、电解水、钠氯氧化还原、酯化反应、葡萄糖燃烧
-- 三入口：选择已注册题型（首期）、文字题目（二期 LLM）、图片识别（二期 Vision）
+### 1.2 已确认决策（冻结）
+| # | 项 | 结论 |
+|---|----|------|
+| 1 | 首期范围 | 化学 + 数学（立几 + 解几） |
+| 2 | 入口 | 文本 / 方程(式) / 图片都做；交付序：文本→方程→图片 |
+| 3 | AI 权限 | 老师 + 学生都可以 |
+| 4 | 分子库 | 全自动扩展 |
+| 5 | 数学优先 | **先解析几何，后立体几何** |
+| 6 | 模型通道 | **sub2api** |
+| 7 | 图片 | **识别后先确认再生成** |
+| 8 | 晋升正式题型 | **放入首期最后一程（M5）** |
+| 9 | 学生默认日配额 | **10 次/日**（admin 可调） |
+| 10 | 教师默认日配额 | **50 次/日**（工程默认，admin 可调） |
 
-## Research Findings
+### 1.3 工程默认
+- LLM 仅服务端；只产出 Spec JSON
+- kernel/schema 校验失败不成成功课件
+- 固定题型路径保留
 
-### edulab 项目结构
-- 性质：Claude Code 插件 / npm 包 `@wy51ai/edulab`
-- 三大技能各自独立，结构统一：
-  - `SKILL.md`：技能说明
-  - `lib/`：sympy 计算核心（kernel + 库）
-  - `scripts/generate.py`：CLI 生成器，REGISTRY 注册表
-  - `template/*.html`：数据驱动模板，含 `__LESSON_DATA__` 占位符
-  - `references/`：problem-schema.md、conventions.md
-- 输出：自包含单页 HTML，可直接浏览器打开
-- 依赖：python3 + sympy
+## 2. 现状基线（摘要）
+- 平台 jobs + skillRunner + `@wy51ai/edulab`
+- 化学 6 / 解几 6 / 立几 3 固定题
+- 化学分子库约 15 种，可自动扩展
+- 历史实测：部分 sub2api 公网对话接口可能被 WAF 拦截——实现期需连通性探测与运维放行（记入风险）
 
-### edulab 技能 1：edu-solid-geometry
-- 渲染：Three.js 3D + MathJax
-- 已注册题型：cube（正方体线面角）、box（长方体体积）、random（随机种子）
-- 几何体库：bodies.py 提供 cuboid/cube/quad_pyramid/tri_pyramid/prism 拓扑
-- 计算核心：geometry_kernel.py 提供 solve_cube_line_plane_angle 等
-- CLI: `python3 generate.py cube|box|random <seed> [output.html]`
-- 数据结构：lesson（元信息+答案）、steps（分步解析+高亮+镜头）、model（points/spheres/edges/elements）
+## 3. 产品目标
+师生经文本、公式/方程、图片动态生成**化学 + 数学**交互课件；解几优先；sub2api 出模型；图片先确认；分子全自动补库；M5 支持晋升正式题型。
 
-### edulab 技能 2：edu-analytic-geometry
-- 渲染：2D Canvas + KaTeX
-- 已注册题型（6种）：
-  - ellipse_dot_range：椭圆 MA·MB 数量积范围
-  - ellipse_chord_range：椭圆弦长范围
-  - ellipse_area_max：椭圆三角形面积最值
-  - ellipse_slopeprod_const：椭圆斜率积定值
-  - parabola_dot_const：抛物线焦点弦 OA·OB 定值
-  - hyperbola_ecc_range：双曲线离心率范围
-- 计算核心：analytic_kernel.py（联立+韦达+range/const 判定）
-- conics.py：椭圆/双曲线/抛物线/圆定义
-- CLI: `python3 generate.py list|all|<type> [output]`
-- 交互引擎：参数滑块驱动实时重算，理论范围条/定值指示
+## 4. 用户故事（关键更新）
+1. 师生-化学-文本/方程 → morph 课件  
+2. 缺分子时系统自动补库并继续（失败不脏写）  
+3. 师生-解几-文本/式子 → 解析几何交互页  
+4. 师生-图片：上传 → **识别草稿展示** → 用户确认/改字段 → 生成  
+5. 立几在解几主路径稳定后上线  
+6. 学生日限额 10；超限明确提示  
+7. Admin/教师在 M5 将优质 AI 课件晋升为正式题型  
 
-### edulab 技能 3：edu-chem-reaction
-- 渲染：Three.js 3D 分子动画 + KaTeX
-- 已注册反应（6种）：
-  - combustion_ch4：甲烷燃烧
-  - combustion_h2：氢气燃烧
-  - electrolysis_water：电解水
-  - redox_na_cl2：钠氯氧化还原
-  - esterification：酯化反应（机理·催化剂）
-  - glucose_combustion：葡萄糖燃烧
-- 计算核心：reaction_kernel.py（配平+原子守恒+键断裂/生成+组装）
-- molecules.py：VSEPR 分子几何库
-- 双引擎：morph（原子变形，展示守恒）、mechanism（机理关键帧）
-- CLI: `python3 generate.py list|random <seed>|all|<type> [output]`
+## 5. 功能需求优先级（更新后）
 
-### 参考项目 ai-teaching-video-platform 架构
-- 前端：React 19 + Vite 6 + TypeScript（单页应用，view 切换）
-- 后端：Express 4 + Node.js（REST JSON API）
-- Worker：独立 Node 进程，处理重 CPU 任务
-- 数据库：MySQL 8 或内存 JSON（双模式，USE_MYSQL 环境变量切换）
-- 认证：scrypt 密码哈希 + Bearer Token 会话
-- RBAC：student / teacher / admin
-- 部署：Docker + docker-compose
+### 入口
+| ID | 需求 | 优先级 |
+|----|------|--------|
+| FR-A1 | 文本生成（化+数） | P0 |
+| FR-A2 | 方程/式子生成 | P0 |
+| FR-A3 | 图片识别生成 | P0（第三交付） |
+| FR-A3a | **图片识别结果确认门闩**（必经） | **P0** |
+| FR-A4 | 固定题型保留 | P0 |
+| FR-A6 | 自动路由 chem/analytic/solid | P0 |
 
-### 参考项目数据模型（表）
-- users：用户（id, email, nickname, password_hash, role, status, teacher_subjects, grade）
-- sessions：会话（token, user_id, created_at）
-- generation_jobs：生成任务（id, status, progress, current_stage, topic, output_profile, error_message, ...）
-- courses：课程（id, title, topic, subject, grade, chapter, summary, publish_status, visibility, ...）
-- course_assets：课程资源（id, job_id, course_id, asset_type, path, mime_type, size_bytes）
-- course_reviews：审核记录（id, course_id, reviewer_id, status, comment, ...）
-- subjects / knowledge_points：学科与知识点目录
-- system_config：系统配置
-- user_model_settings：用户级模型偏好
-- rural_pilot_evidence_records：乡村试点记录
+### 学科
+| ID | 需求 | 优先级 |
+|----|------|--------|
+| FR-B-chem | 化学 morph + kernel | P0 |
+| FR-B-mol | 分子全自动扩展 | P0 |
+| FR-B-analytic | **解析几何 LLM spec** | **P0（数学第一）** |
+| FR-B-solid | 立体几何 LLM spec | P0（数学第二） |
+| FR-B-mech | 化学 mechanism | P2 |
 
-### 参考项目 API 模块
-- auth：POST /register, /login, /logout, GET /me, PATCH /me/profile
-- jobs：POST /, GET /, GET /:id, POST /:id/retry, /cancel, GET /:id/assets
-- courses：GET /, GET /:id, POST /, PATCH /:id, DELETE /:id, POST /:id/submit
-- teacher/reviews：GET pending/done, POST /courses/:id/review
-- catalog：GET subjects/grades/categories/knowledge-points
-- admin：users, subjects, knowledge-points, stats, config, jobs, courses
-- assistant：POST /chat
-- rural-pilots：CRUD + summary + submit + verify
-- model-settings：GET/PUT/reset /me/model-settings
+### 治理
+| ID | 需求 | 优先级 |
+|----|------|--------|
+| FR-C-promote | **晋升正式题型** | **P0-M5（首期最后）** |
+| FR-D-quota-s | 学生默认 10/日 | P0 |
+| FR-D-quota-t | 教师默认 50/日 | P0 |
+| FR-E-sub2api | 服务端 sub2api 通道 | P0 |
 
-### 参考项目关键工程模式
-- async handler 自动包装（Express 4 不捕获 async rejection）
-- auth/requireRole 中间件
-- memory DB 持久化到 JSON 文件（原子写：tmp + rename）
-- generateId(prefix) 生成唯一 ID
-- Worker 轮询 queued job，抢占式执行
-- 前端 AppView 联合类型 + setView 切换
-- Vite proxy 转发 /api /uploads /health 到后端
+## 6. 图片确认流（已定）
+```text
+上传图片
+  → Vision/OCR + LLM 结构化草稿（equation/条件/skillHint/关键几何元素）
+  → 前端确认页（可编辑关键字段）
+  → 用户点击确认
+  → 创建正式 AI 生成 Job
+  → Spec 校验 → HTML
+```
+- 未确认不得扣成功课件名额以外的「直接出课」；**确认后创建 job 计配额**（与文本直接创建 job 一致，细则 Phase3 写死）
+- 低置信度字段高亮，要求用户核验
 
-## Technical Decisions
+## 7. sub2api 通道（需求级）
+- 调用方：仅 Node 服务端
+- 协议：OpenAI compatible（chat/completions 或所支持的 responses，实现期探测）
+- 配置：环境变量 / system_config，不进仓库明文
+- 用途：意图路由、Spec 生成、修复重试、Vision、分子定义生成
+- 失败：重试、降级错误信息、不写假成功 lesson
+- 运维依赖：API 路径需避开 WAF 人机验证（已知风险）
 
-| Decision | Rationale |
-|----------|-----------|
-| 前端 React 19 + Vite + TS | 与参考项目一致 |
-| 后端 Express + Node.js | 与参考项目一致，复用 auth/db/async 包装模式 |
-| Worker: Node 调度 + Python child_process | kernel 是 Python/sympy，Node 负责任务队列和进度 |
-| DB 双模式（内存 JSON + MySQL） | 开发零依赖，生产可切换 |
-| 三技能通过 npm 依赖引入 | `npm i @wy51ai/edulab`，Python 解析 node_modules 路径调用 |
-| 课件存储为自包含 HTML | edulab 原生输出，直接托管 + iframe 预览 |
-| 不做班级/作业/协作 | 首期只做课件生成与管理（用户已确认） |
-| 首期仅支持已注册题型 + 参数输入 | 文字/图片入口需要 LLM/Vision，列为二期（用户已确认） |
-| 课件表名 lessons（非 courses） | 与视频课程区分，语义更准确 |
+## 8. 配额（已定默认）
+| 角色 | 默认日配额 | 说明 |
+|------|------------|------|
+| student | **10** | 防刷；可 admin 改 |
+| teacher | **50** | 教研更高 |
+| admin | 不限或 200 | 可配 |
 
-## Issues Encountered
-| Issue | Resolution |
-|-------|------------|
-| heredoc 写入大文件时 JSON 解析失败 | 改用 Python 或 apply_patch 写入 |
+建议计数口径：**每创建 1 次 AI 生成 Job +1**（含随后失败），避免无限重试刷模型；「仅确认页、未点生成」不计。最终口径 Phase3 冻结。
 
-## Resources
-- edulab GitHub: https://github.com/wy51ai/edulab
-- 参考项目: /mnt/f/work/code/github/hailaobao2026/ai-teaching-video-platform
-- edulab npm 包: @wy51ai/edulab (skills 位于 node_modules/@wy51ai/edulab/skills/)
-- edulab 本地克隆（参考）: /tmp/edulab
-- edulab 三大技能 CLI:
-  - `python3 skills/edu-solid-geometry/scripts/generate.py cube [out.html]`
-  - `python3 skills/edu-analytic-geometry/scripts/generate.py ellipse_dot_range [out.html]`
-  - `python3 skills/edu-chem-reaction/scripts/generate.py combustion_ch4 [out.html]`
+## 9. 晋升正式题型（M5）
+- 来源：成功 AI lesson + 有效 spec
+- 动作：写入动态 catalog / 导出可复用条目，`enabled` 可控
+- 权限：admin 执行；teacher 可申请
+- 效果：学生以后可从固定/扩展目录直开，不再走 LLM
+- 安排：**首期最后一程**，不阻塞 M1–M4 动态生成
 
-## Visual/Browser Findings
-- edulab demo GIF 展示了三种技能的交互效果：
-  - 立体几何：3D 可旋转模型，分步高亮线/面/法向量，镜头切换
-  - 解析几何：2D Canvas 圆锥曲线，滑块驱动参数变化，实时数值读数
-  - 化学反应：3D 分子动画，滑块看断键/成键/原子重组
+## 10. 里程碑映射
+| 里程碑 | 内容 |
+|--------|------|
+| M0 | sub2api + 配额 + AI job 骨架 |
+| M1 | 化学文本/方程 |
+| M2 | 分子全自动扩展 |
+| M3 | **解析几何**文本/式子 |
+| M4 | 图片（确认门闩）化+解几 |
+| M4b | 立体几何 |
+| M5 | **晋升正式题型** + 收尾增强 |
+
+## 11. 权限矩阵
+| 角色 | AI 三入口 | 默认日配额 | 公开分享 | 晋升 |
+|------|-----------|------------|----------|------|
+| student | 是 | 10 | 默认否 | 否 |
+| teacher | 是 | 50 | 可送审 | 可申请 |
+| admin | 是 | 高/不限 | 是 | 是 |
+
+## 12. 风险（节选）
+- sub2api 可用性/WAF  
+- 自动分子科学性 → 自检门闩  
+- 图片误识 → 确认门闩  
+- 学生成本 → 10/日  
+
+## 13. 验收方向
+- 固定题全回归  
+- 化学：文本/方程金标 + 至少 1 条自动补分子  
+- 解几：文本/式子金标  
+- 图片：无确认不能出最终课；确认后可出  
+- 配额：学生第 11 次被拒  
+- M5：晋升后目录可直达  
+
+## 14. 已无阻塞的产品决策
+首期产品决策已齐。剩余主要是 Phase2 金标用例清单细化与 Phase3 技术方案。
+
+## 15. 结论
+采用 **sub2api** 服务端通道；数学 **解析几何优先**；图片 **先确认后生成**；学生 **10 次/日**；**晋升题型放 M5**；化学分子库全自动扩展；师生均可使用 AI 三入口。
+
+## 16. Phase 3 架构草案索引
+详见：`docs/planning/phase3-architecture-api.md`
+
+摘要：
+- Job 分 `fixed` / `ai`，扩展 `generation_jobs`
+- 新 API：`/api/ai/quota`、`/api/ai/jobs`、`/api/ai/image-drafts*`、M5 promote
+- 图片强制确认；配额在创建 AI job 时计
+- sub2api 仅服务端；分子 JSON 扩展库 + 自检
+- 数学先 analytic 再 solid
+
+## 17. 实现推进（2026-08-05）
+- 实现选择已冻结（见 phase3 文档 §19）
+- Analytic/Solid Spec 字段表：`docs/planning/spec-fields-analytic-solid.md`
+- **M0 基建已落地**：sub2api client、配额、AI job/drafts API、worker AI stub
+- AI 任务目前会被 worker 标记失败并提示等待 M1 管线（预期行为）
+
+## 18. M1 化学管线
+- API 仍用 `POST /api/ai/jobs`（inputMode text/equation）
+- Worker 对 `kind=ai` 且化学路由执行 `runChemAiPipeline`
+- 已知反应快路径不依赖 LLM；动态路径依赖 `SUB2API_*`
+- 正确性门闩：`reaction_kernel.assemble_data`
+
+
+## Findings — M2 / sub2api 运维
+
+1. **模型可用性会变**：同一 key 下 `/models` 可能从 16 个缩到 2 个；硬编码 `grok-4.5` 会导致 404。生产应启动时 health + 可配置 fallback model。
+2. **分子扩展正确性门闩**：不能只信 LLM JSON，必须 `selfcheck-molecule` + `assemble_data` 再持久化。
+3. **slot 约定漂移**：扩展分子 slot（如 S 用 `A` 还是 `X`）可能与首轮 atom_map 不一致，repair 循环（maxAttempts）可收敛。
+4. **扩展库位置**：默认 `server/data/molecule-extensions.json`，可用 `MOLECULE_EXTENSIONS_FILE` 隔离 e2e/测试。
+
+
+## Findings — M3 解析几何
+1. 已知 registry 快路径与化学一致，关键词命中 `ellipse_dot_range` 等 6 题即可免 LLM。
+2. LLM 动态 Spec 以 schema 校验 + `generate.render_html` 注入模板为主；不做完整 sympy 重算（首期可演示，金标精算可后补）。
+3. deepseek-v4-flash 对复杂 board JSON 有时 HTTP 524 / 超长 reasoning，需 `maxRepairAttempts` + 长 timeout。
+4. worker 空 `skillHint` 可用关键词推断 chem/analytic。

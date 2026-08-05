@@ -1,119 +1,91 @@
 # Progress Log
 
-## Session: 2026-08-04
+## Session: 2026-08-05 — 真实 sub2api 联调（grok-4.5）
 
-### Phase 1: 需求分析与架构设计
-- **Status:** complete
-- **Started:** 2026-08-04 15:02
-- Actions taken:
-  - 克隆 wy51ai/edulab 仓库到 /tmp/edulab，阅读 README、package.json
-  - 分析三大技能目录结构、SKILL.md、generate.py、lib/、template/
-  - 统计已注册题型：立体几何 3 种、解析几何 6 种、化学反应 6 种
-  - 阅读参考项目 ai-teaching-video-platform 的 package.json、AGENTS.md、架构文档
-  - 分析参考项目 server/index.js 路由（60+ API）、db.js 数据层、services/ 模块
-  - 分析参考项目前端 App.tsx 视图结构、types.ts 类型定义、vite.config.ts
-  - 明确技术选型：React+Vite+TS / Express / Node Worker + Python child_process / MySQL+内存双模式
-  - 创建 task_plan.md（9 个阶段）和 findings.md
-  - 用户确认：npm 依赖引入、首期只做已注册题型、只做课件生成与管理
-- Files created/modified:
-  - task_plan.md (created)
-  - findings.md (created)
-  - progress.md (created)
+### 配置
+- Base: `https://sub2api.duckcloud.fun/v1`
+- Model: `grok-4.5`
+- 写入本地 `.env`（已在 `.gitignore`）
 
-### Phase 2: 项目脚手架与基础设施
-- **Status:** complete
-- Actions taken:
-  -
-- Files created/modified:
-  -
+### 结果
+1. `/models` 健康检查：OK（16 models）
+2. 简单 chat：OK，`finishReason=stop`，返回 `OK`
+3. 已知反应快路径「电解水」：OK，HTML ~48KB
+4. LLM 动态路径 `C + O2 -> CO2`：
+   - 初版 atom_map 常不合法
+   - 已增强 prompt 示例 + normalize 自动补常见 atom_map
+   - 复测：1 次校验通过并渲染 HTML **47129 bytes**，route=`llm_spec`
 
-### Phase 3: 数据层与认证授权
-- **Status:** complete
-- Actions taken:
-  -
-- Files created/modified:
-  -
+### 代码小改进
+- `server/services/ai/chem/prompts.js`：补充 atom_map 示例与 slot 约定
+- `server/services/ai/chem/llmSpec.js`：清理非法 map + 常见反应 map 合成
 
-### Phase 4: 题型目录与生成任务
-- **Status:** complete
-- Actions taken:
-  -
-- Files created/modified:
-  -
+### 风险提示
+- API Key 曾在对话中明文提供，建议轮换
+- grok-4.5 reasoning token 较多，建议 timeout ≥ 180–300s
 
-### Phase 5: Python 生成 Worker
-- **Status:** complete
-- Actions taken:
-  -
-- Files created/modified:
-  -
 
-### Phase 6: 课件库与预览
-- **Status:** complete（封面提取延期）
-- Actions taken:
-  -
-- Files created/modified:
-  -
+## Session: 2026-08-05 — E2E 收口 + M2 分子全自动扩展
 
-### Phase 7: 前端页面
-- **Status:** complete
-- Actions taken:
-  -
-- Files created/modified:
-  -
+### E2E（LLM 路径）
+- 根因：`grok-4.5` 在当前 sub2api 账号不可用 → HTTP 404 / UPSTREAM_HTTP
+- 可用模型：`deepseek-v4-flash`、`deepseek-v4-flash-free`（`/v1/models` 仅 2 个）
+- 切换 `SUB2API_MODEL=deepseek-v4-flash` 后：
+  - 已知路径电解水：已成功（此前）
+  - LLM 路径 `C + O2 -> CO2`：成功，`route=llm_spec`，HTML ~47KB，lesson `les_msg1a6ti_76f743`
 
-### Phase 8: 管理后台
-- **Status:** complete
-- Actions taken:
-  -
-- Files created/modified:
-  -
+### M2 实现
+- `server/services/ai/chem/moleculeStore.js`：JSON 扩展库读写 + 静态校验
+- `server/services/ai/chem/moleculeExtender.js`：缺 species → LLM 生成分子 → selfcheck → 持久化
+- `chem_spec_tool.py`：`--extensions` 注入 + `selfcheck-molecule`
+- `validateRender.js` / `pipeline.js`：校验渲染走扩展库；pipeline 标记 `m2_chem`
+- 存储：`MOLECULE_EXTENSIONS_FILE`（默认 `server/data/molecule-extensions.json`）
+- 测试：`server/tests/ai_m2_molecule.test.js`（4）+ m1 回归 5 全绿
 
-### Phase 9: 测试与交付
-- **Status:** complete
-- Actions taken:
-  -
-- Files created/modified:
-  -
+### M2 联调
+- 直接 ensureSpecies：`S`/`SO2` 扩展并渲染 HTML ~46KB
+- 全链路 job `S + O2 -> SO2`：
+  - job `job_msg1ltxn_2703d6` succeeded
+  - lesson `les_msg1mr43_2ec2f3`，HTML 47316 bytes
+  - `ai_meta.moleculeExtended=["S","SO2"]`，route=`llm_spec`
 
-## Test Results
-| Test | Input | Expected | Actual | Status |
-|------|-------|----------|--------|--------|
-|      |       |          |        |        |
+### 配置
+- e2e env：`/tmp/edulab-e2e.env` model=deepseek-v4-flash
+- 本地 `.env` 同步 deepseek
+- 建议轮换已暴露的 API Key
 
-## Error Log
-| Timestamp | Error | Attempt | Resolution |
-|-----------|-------|---------|------------|
-| 2026-08-04 15:30 | heredoc 写大文件导致 JSON 解析失败 | 1 | 改用 Python 脚本写入 |
 
-## 5-Question Reboot Check
-| Question | Answer |
-|----------|--------|
-| Where am I? | All phases complete（需求分析与架构设计），即将完成 |
-| Where am I going? | Done — ready for delivery：脚手架、数据层、任务、Worker、课件库、前端、后台、测试 |
-| What's the goal? | 基于 edulab 三技能构建 Web 管理系统，参考 ai-teaching-video-platform 架构 |
-| What have I learned? | 见 findings.md（edulab CLI/数据结构、参考项目架构/API/数据模型） |
-| What have I done? | 研究两个项目，创建 task_plan.md / findings.md / progress.md |
+## Session: 2026-08-05 — M3 解析几何
 
----
-*Update after completing each phase or encountering errors*
+### 实现
+- `server/services/ai/analytic/*`：knownProblems / prompts / llmSpec / validateRender / pipeline
+- `server/services/ai/python/analytic_spec_tool.py`：validate + render(board.html)
+- worker：chem | analytic 路由；空 skillHint 时关键词意图推断
+- 测试：`server/tests/ai_m3_analytic.test.js`（5）
 
-## Completion Summary (2026-08-04, corrected after review)
+### E2E
+- 已知路径「椭圆数量积取值范围」→ `ellipse_dot_range`，lesson `les_msg2b88j_e26caa`，HTML ~53KB
+- LLM 路径弦中点轨迹：
+  - attempt1：HTTP 524（UPSTREAM_5XX）
+  - attempt2：校验通过并渲染，lesson `les_msg2itum_0a1df3`，`route=llm_spec`，pipeline=`m3_analytic`
+  - 注意 deepseek reasoning tokens 很高（~9k），超时建议 180–300s
 
-All 9 phases complete:
-- Backend: Express API with auth, RBAC, jobs, lessons, admin (60+ routes equivalent)
-- Worker: Node scheduler + Python/sympy child process, e2e verified for all 3 skills
-- Frontend: React 19 SPA with teacher review and admin configuration/catalog controls
-- Database: MySQL + in-memory JSON dual mode
-- Docker: Dockerfile + docker-compose (MySQL + API + Worker)
-- Tests: 7 unit tests passing
-- E2E: Registered users, created 3 jobs (solid/analytic/chem), all generated successfully, lesson preview verified
-- Docs: README.md with API reference, env vars, project structure
+### 下一里程碑
+- M4 图片入口（识别确认后生成）
+- 或 M4b 立体几何
 
-## Review Remediation (2026-08-04)
+## Session: 2026-08-05 — M4 图片入口
 
-- Registration now forces the student role; demo seeding is disabled by default and requires a strong explicit password.
-- Added session TTL enforcement, anonymous approved-public lesson filtering, guarded publication transitions, private iframe token access, and generic production errors.
-- Fixed job field mapping, atomic MySQL claims, cancellation/retry semantics, stale-job recovery, configurable worker concurrency, and Python timeouts.
-- Added regression tests for cancellation, lesson visibility, retry, session expiry, and job mapping (11 tests total).
-- Added signed short-lived preview URLs, worker lease ownership and cancellation, memory DB locking for queue mutations, request limits, generic persisted errors, teacher review/catalog/assets APIs, and secret-injected Compose configuration.
+### 实现
+- `server/services/ai/image/recognize.js`：visionCompletions + 识别 + 落盘
+- `server/index.js`：/api/ai/image-drafts 支持 base64 / url + 真实识图
+- `db.js`：patch 支持 assetPath / rawRecognition
+- 确认路由：buildConfirmSourceText + 配额 + 落盘 + 出课
+
+### E2E
+- 已知路径：电解水、解析几何
+- LLM 路径：解析几何、化学反应
+- M4 图片端到端已通
+
+### 下一
+M5 晋升正式题型 + 端到端图片确认生成

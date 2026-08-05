@@ -1,113 +1,128 @@
-# Task Plan: EduLab Web 管理系统
+# Task Plan: LLM 驱动动态扩展教学课件（化学 + 数学）
 
 ## Goal
-基于 wy51ai/edulab 开源项目的三大交互教学技能（立体几何、解析几何、化学反应），参考 ai-teaching-video-platform 的全栈架构，构建一个 Web 管理系统：用户可通过浏览器选择题型/参数、提交生成任务、预览交互课件、管理课件库，并具备用户权限、任务队列、管理后台等完整平台能力。
+在现有 EduLab Web 平台上引入大语言模型（LLM），使**教师与学生**都可通过 **文本 → 方程/式子 → 图片** 三入口，动态生成并扩展：
+- **化学**：化学反应交互课件（`edu-chem-reaction`）
+- **数学**：优先**解析几何**，其后立体几何（`edu-analytic-geometry` → `edu-solid-geometry`）
+
+生成链路：**LLM 输出技能标准 JSON Spec → kernel/schema 校验 → 模板渲染 HTML**。  
+分子库缺口 **全自动扩展**；模型通道使用 **sub2api**；图片路径 **识别后先确认再生成**。  
+实现编码在 Phase 2–5 方案冻结后启动。
+
+## Background
+- 固定题型双注册：`@wy51ai/edulab` REGISTRY + `skillCatalog.js`
+- 用户决策（累计）：
+  1. 首期化学 + 数学
+  2. 入口文本 / 方程 / 图片都做（顺序落地）
+  3. 师生均可 AI 生成
+  4. 分子库全自动扩展
+  5. **数学先做解析几何**
+  6. **模型通道：sub2api**
+  7. **图片：识别后先确认再生成**
+  8. **晋升正式题型：放入首期最后里程碑**
+  9. **学生默认日配额：10 次/日**（可 admin 调整；教师默认 50 次/日）
 
 ## Current Phase
-Phase 9
+M0–M3 完成（化+分子扩展+解析几何）；下一里程碑 M4 图片入口 / M4b 立几
 
 ## Phases
 
-### Phase 1: 需求分析与架构设计
-- [x] 研究 edulab 三大技能的功能、输入输出、CLI 接口
-- [x] 研究参考项目 ai-teaching-video-platform 的前后端架构
-- [x] 明确功能范围与技术选型
-- [x] 输出架构设计文档（模块划分、API 设计、数据模型）
+### Phase 1: 需求整理与方案边界
+- [x] 现状与目标、FR/NFR、planning 三文件
+- [x] 用户确认回收（两轮）
 - **Status:** complete
 
-### Phase 2: 项目脚手架与基础设施
-- [x] 初始化项目结构（frontend / server / worker），npm 安装 `@wy51ai/edulab`
-- [x] 配置 Vite + React + TS 前端、Express 后端、Python worker
-- [x] 配置 Docker / docker-compose（MySQL + Node API + Worker）
-- [x] 配置 .env / .env.example
-- [x] 建立内存 DB + MySQL 双模式
-- **Status:** complete
+### Phase 2: 产品方案与验收标准（PRD 级）
+- [x] 范围：化学 + 数学（解几优先，立几随后）
+- [x] 入口：文本 → 方程 → 图片
+- [x] 权限：teacher + student
+- [x] 分子库：全自动 + 自检
+- [x] 模型通道：**sub2api**（OpenAI compatible，服务端调用）
+- [x] 图片：**识别结果确认门闩**后再进生成
+- [x] 晋升正式题型：**首期最后一个里程碑（M5）**
+- [x] 学生默认配额：**10 次/日**；教师 **50 次/日**（默认，可配）
+- [ ] 金标集与验收用例成文（化/解几/立几/补分子/图片确认）
+- [ ] 失败降级文案与状态码约定
+- **Status:** in_progress（仅余验收清单细化）
 
-### Phase 3: 数据层与认证授权
-- [x] 设计并实现数据表：users, sessions, generation_jobs, lessons, lesson_assets, problem_catalog, system_config
-- [x] 实现注册/登录/会话（scrypt 密码哈希，同参考项目）
-- [x] 实现 RBAC：student / teacher / admin 三种角色
-- [x] 实现用户资料接口
-- **Status:** complete
+### Phase 3: 技术架构设计
+- [x] 统一 AI 编排 + intent 路由（草案）
+- [x] 三技能 Spec 策略：chem 已有；analytic/solid 反推（草案）
+- [x] sub2api 客户端封装要点（草案）
+- [x] 图片：draft → 确认 → job（API 已定）
+- [x] 分子全自动扩展流水线（草案）
+- [x] Job/数据模型扩展字段（草案）
+- [x] skills override / 不改死 node_modules（草案）
+- [x] API 路径与里程碑切片（见 docs）
+- [x] 评审冻结 §开放实现选择（用户同意建议）
+- [x] 导出 Analytic/Solid Spec 字段表
+- **Status:** complete（草案+字段表+选择冻结）
 
-### Phase 4: 题型目录与生成任务
-- [x] 建立可持久化、可管理的 problem_catalog：启动时同步内置题型，并提供管理员启停 API/UI
-- [x] 实现 `POST /api/jobs`：接收 skill + problem_type + 参数
-- [x] 实现 `GET /api/jobs`、`GET /api/jobs/:id`、retry、cancel
-- [x] 任务状态机：queued → running → succeeded/failed/cancelled
-- **Status:** complete
+### Phase 4: 安全、成本、配额与治理
+- [ ] sub2api Key 仅服务端；按用户透传/或平台统一上游账号策略
+- [ ] 配额中间件（student 10 / teacher 50 默认）
+- [ ] 图片与 prompt 审计、缓存
+- [ ] 危险化学提示；注入防护
+- **Status:** pending
 
-### Phase 5: Python 生成 Worker
-- [x] Node worker 调度层：轮询 queued job → 调用 Python
-- [x] 封装 skill runner：定位 skills/<skill>/scripts/generate.py，传递参数/JSON spec
-- [x] 捕获 stdout/stderr、解析输出 HTML、写入 artifacts
-- [x] 回写 progress / current_stage / result / error_message
-- [x] 支持随机出题 seed
-- [ ] 文字题目 spec、图片上传题目（延期到 LLM/Vision 二期）
-- [x] 并发控制（默认 1，sympy 渲染吃 CPU）
-- **Status:** complete
+### Phase 5: 里程碑（编码前冻结）
+- [x] **M0** 基建：AI job、sub2api 通道、配额、日志；固定题型回归
+- [x] **M1** 化学文本 + 方程（morph + kernel + 重试）
+- [x] **M2** 分子库全自动扩展
+- [x] **M3** **解析几何**文本 + 式子
+- [ ] **M4** 图片入口（化+解几）：**识别 → 确认 → 生成**
+- [ ] **M4b** 立体几何文本/式子/图片（确认流复用）
+- [ ] **M5** **晋升正式题型** + 增强（mechanism 等按需）
+- **Status:** pending
 
-### Phase 6: 课件库与预览
-- [x] 生成成功后自动创建 lesson 记录
-- [x] 课件 CRUD：列表、详情、更新、删除
-- [x] 课件发布/可见性：private / public / pending / approved / rejected
-- [x] HTML 课件静态托管与签名访问（/lessons/:id/view）
-- [ ] 课件封面/缩略图提取（当前仅登记 HTML 资产，封面提取延期）
-- **Status:** complete
+### Phase 6: 实现与联调
+- [x] 冻结实现选择与 Spec 字段表
+- [x] **M0** 基建编码：sub2api client、配额、AI job 字段、AI API 骨架
+- [x] **M1** 化学 text/equation → 已知反应快路径 / LLM Spec → kernel 校验修复 → HTML
+- [x] M2 分子全自动扩展
+- [x] M3 解析几何
+- **Status:** in_progress（M0）
 
-### Phase 7: 前端页面
-- [x] 登录/注册页
-- [x] 首页（平台介绍 + 快速入口）
-- [x] 课件生成中心（选择学科/技能/题型 → 填参数 → 提交 → 实时进度）
-- [x] 任务中心（状态、进度、重试、取消）
-- [x] 课件广场（公开课件浏览、筛选）
-- [x] 我的课件
-- [x] 课件预览页（iframe 嵌入交互 HTML）
-- [x] 教师审核页（教师/管理员 pending、approve、reject）
-- [x] 管理后台（用户管理、统计、题型目录、系统配置）
-- [x] 个人资料
-- **Status:** complete
+## Decisions（冻结）
+| Decision | 结论 | 状态 |
+|----------|------|------|
+| 首期学科 | 化学 + 数学 | 已确认 |
+| 数学顺序 | **解析几何 → 立体几何** | 已确认 |
+| 入口 | 文本 / 方程 / 图片；顺序交付 | 已确认 |
+| AI 权限 | 老师 + 学生 | 已确认 |
+| 分子库 | 全自动扩展 | 已确认 |
+| 模型通道 | **sub2api** | 已确认 |
+| 图片流程 | **识别后先确认再生成** | 已确认 |
+| 晋升题型 | **首期 M5** | 已确认 |
+| 学生日配额 | **10 次/日（默认）** | 已确认（推荐值落盘；admin 可改） |
+| 教师日配额 | **50 次/日（默认）** | 工程默认 |
+| LLM 位置 | 仅服务端 | 已定 |
+| 输出 | Spec + HTML；固定题型保留 | 已定 |
+| 校验失败 | 自动重试 N 次 + 可读错误 | 已定 |
 
-### Phase 8: 管理后台
-- [x] 用户列表、禁用/启用、角色调整
-- [x] 平台统计（用户数、任务数、课件数、运行中任务）
-- [x] 题型目录管理（注册题型、启用/禁用）
-- [x] 系统配置（sympy 路径、worker 并发、artifacts 根目录）
-- [x] 课件审核（管理员审核公开课件）
-- **Status:** complete
-
-### Phase 9: 测试与交付
-- [x] 后端单元测试（auth、jobs、lessons、rbac）
-- [x] Worker 集成测试（mock Python 或真实跑一道题）
-- [x] 端到端冒烟：注册 → 登录 → 生成 cube 题 → 预览
-- [x] Docker 一键启动验证
-- [x] README 与部署文档
-- **Status:** complete
-
-## Key Questions
-1. ~~vendor 还是 npm 依赖~~ → 已确认：npm 依赖 `@wy51ai/edulab`
-2. ~~首期是否只做已注册题型~~ → 已确认：首期只做"选择已注册题型 + 参数"，文字/图片入口留二期
-3. ~~是否需要班级/作业~~ → 已确认：首期只做课件生成与管理，不做班级/作业
-
-## Decisions Made
-| Decision | Rationale |
-|----------|-----------|
-| 前端 React 19 + Vite + TS | 与参考项目一致，降低维护成本 |
-| 后端 Express + Node | 与参考项目一致，复用 auth/db 模式 |
-| Worker 采用 Node 调度 + Python 子进程 | edulab kernel 是 Python/sympy，Node 负责任务队列和进度回写 |
-| DB 双模式（内存 JSON + MySQL） | 与参考项目一致，开发零依赖，生产用 MySQL |
-| 三技能通过 npm 依赖引入 | `npm i @wy51ai/edulab`，skills 文件位于 node_modules/@wy51ai/edulab/skills/，Python 按该路径调用 |
-| 课件以自包含 HTML 存储 | edulab 原生输出即单文件 HTML，直接托管/iframe 预览 |
+## Risks
+| 风险 | 缓解 |
+|------|------|
+| sub2api 入口 WAF/不稳定 | 服务端重试、健康检查、错误透出；运维侧放行 API |
+| 全自动分子科学性 | 自检不通过不入库 |
+| 学生配额被刷 | 10/日 + 审计 + admin 可关 |
+| 图片确认增加一步 | 换准确率；草稿可编辑 |
+| 范围大 | 严格 M0–M5；解几先于立几 |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|
-|       | 1       |            |
+| （尚无） |  |  |
 
 ## Notes
-- edulab 三大技能的输出都是自包含 HTML（Three.js/MathJax/KaTeX 内联或 CDN），可直接作为静态资源托管
-- 立体几何：3 种已注册题型（cube/box/random），覆盖线面角、体积等
-- 解析几何：6 种已注册题型（ellipse_dot_range, ellipse_chord_range, ellipse_area_max, ellipse_slopeprod_const, parabola_dot_const, hyperbola_ecc_range）
-- 化学反应：6 种已注册反应（combustion_ch4, combustion_h2, electrolysis_water, redox_na_cl2, esterification, glucose_combustion）
-- 每个 generate.py 都支持 list / all / random / <key> [output] 命令
-- 模板通过 `__LESSON_DATA__` 占位符注入 JSON 数据
+- sub2api 配置项（实现期）：`SUB2API_BASE_URL`、`SUB2API_API_KEY`、`SUB2API_MODEL` 等，不入库明文到前端
+- 配额计的是「成功发起的 AI 生成任务」还是「含失败」：建议 **每次创建 AI job 计数**（防刷），Phase3 写死
+- 下一动作：补金标验收清单 → Phase3 架构/API 草案
+
+## Architecture Doc
+- `docs/planning/phase3-architecture-api.md`
+
+## M1 Notes
+- known reaction regex → fixed REGISTRY
+- else LLM JSON spec + assemble_data validate/repair + template render
+- worker `processAiJob`
