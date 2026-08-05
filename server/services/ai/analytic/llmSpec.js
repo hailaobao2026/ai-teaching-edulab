@@ -1,5 +1,6 @@
 import { chatCompletions, getSub2ApiConfig } from '../../llm/sub2apiClient.js';
 import { analyticRepairSystemPrompt, analyticSystemPrompt, analyticUserPrompt } from './prompts.js';
+import { sanitizeTree } from '../sanitize.js';
 
 function stripCodeFence(text) {
   let s = String(text || '').trim();
@@ -35,7 +36,11 @@ export function normalizeAnalyticSpec(raw) {
     throw Object.assign(new Error('analytic spec 为空'), { code: 'SPEC_EMPTY' });
   }
 
-  // unwrap { skillId, lesson, steps, board }
+  const specVersion = Number(spec.specVersion);
+  const skillId = String(spec.skillId || '');
+  const problemKind = String(spec.problemKind || '');
+
+  // unwrap { specVersion, skillId, problemKind, lesson, steps, board }
   const lesson = spec.lesson && typeof spec.lesson === 'object' ? { ...spec.lesson } : {};
   const steps = Array.isArray(spec.steps) ? spec.steps.map(s => ({
     title: s?.title || '步骤',
@@ -105,7 +110,7 @@ export function normalizeAnalyticSpec(raw) {
     board.param = p;
   }
 
-  return { lesson, steps, board };
+  return sanitizeTree({ specVersion, skillId, problemKind, lesson, steps, board });
 }
 
 export async function generateAnalyticSpecFromLlm({ content, inputMode, model, signal, previousError, previousSpec }) {

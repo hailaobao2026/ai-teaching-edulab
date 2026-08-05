@@ -91,6 +91,8 @@ test("m1 chem - pipeline known fast path without LLM", async () => {
 test("m1 chem - isChemAiJob routing", () => {
   assert.equal(isChemAiJob({ kind: "ai", skillHint: "edu-chem-reaction" }), true);
   assert.equal(isChemAiJob({ kind: "ai", skillHint: "edu-analytic-geometry" }), false);
+  assert.equal(isChemAiJob({ kind: "ai", skillHint: "" }), false);
+  assert.equal(isChemAiJob({ kind: "ai", skillHint: "auto" }), false);
   assert.equal(isChemAiJob({ kind: "fixed" }), false);
 });
 

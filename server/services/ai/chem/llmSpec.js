@@ -1,5 +1,6 @@
 import { chatCompletions, getSub2ApiConfig } from '../../llm/sub2apiClient.js';
 import { chemRepairSystemPrompt, chemSystemPrompt, chemUserPrompt } from './prompts.js';
+import { sanitizeTree } from '../sanitize.js';
 
 function stripCodeFence(text) {
   let s = String(text || '').trim();
@@ -52,7 +53,7 @@ function maybeSynthesizeSimpleAtomMap(spec) {
       ['H2#2.Ha', 'H2O#2.Ha'], ['H2#2.Hb', 'H2O#2.Hb']
     ];
   }
-  return spec;
+  return sanitizeTree(spec);
 }
 
 export function normalizeChemSpec(raw) {

@@ -4,7 +4,7 @@ import {
   LogOut, LogIn, Plus, RefreshCw, Eye, Trash2, Check, X, Loader2
 } from "lucide-react";
 import type {
-  AppView, User, Skill, GenerationJob, Lesson, AdminStats, JobStatus
+  AppView, User, Skill, GenerationJob, Lesson, AdminStats, JobStatus, AiQuota, AiImageDraft
 } from "./types";
 
 const API = "";
@@ -86,6 +86,7 @@ export default function App() {
     const items: { id: AppView; label: string; icon: typeof BookOpen; auth?: boolean }[] = [
       { id: "home", label: "首页", icon: BookOpen },
       { id: "create", label: "生成课件", icon: Wand2, auth: true },
+      { id: "ai-create", label: "AI 生成", icon: Wand2, auth: true },
       { id: "jobs", label: "任务中心", icon: Loader2, auth: true },
       { id: "lessons", label: "课件广场", icon: BookOpen },
       { id: "my-lessons", label: "我的课件", icon: FolderOpen, auth: true }
@@ -148,6 +149,7 @@ export default function App() {
           {view === "home" && <HomeView skills={skills} lessons={lessons} onCreate={() => setView(user ? "create" : "login")} onView={openLesson} />}
           {view === "login" && <LoginView mode={authMode} onLogin={handleLogin} onSwitch={m => setAuthMode(m)} message={message} />}
           {view === "create" && user && <CreateView skills={skills} onCreated={() => { refreshJobs(); setView("jobs"); }} />}
+          {view === "ai-create" && user && <AiCreateView skills={skills} onCreated={() => { refreshJobs(); setView("jobs"); }} />}
           {view === "jobs" && user && <JobsView jobs={jobs} skills={skills} onView={openLesson} onRefresh={refreshJobs} onCancel={cancelJob} onRetry={retryJob} />}
           {view === "lessons" && <LessonsView lessons={lessons} skills={skills} onView={openLesson} title="课件广场" />}
           {view === "my-lessons" && user && <LessonsView lessons={myLessons} skills={skills} onView={openLesson} title="我的课件" showOwner onDelete={async id => { await api(`/api/lessons/${id}`, { method: "DELETE" }); refreshLessons(); }} onSubmit={async id => { await api(`/api/lessons/${id}/submit`, { method: "POST" }); refreshLessons(); }} />}
@@ -293,6 +295,93 @@ function CreateView({ skills, onCreated }: { skills: Skill[]; onCreated: () => v
   );
 }
 
+function AiCreateView({ skills, onCreated }: { skills: Skill[]; onCreated: () => void }) {
+  const [mode, setMode] = useState<"text" | "equation" | "image">("text");
+  const [skillHint, setSkillHint] = useState("edu-analytic-geometry");
+  const [content, setContent] = useState("");
+  const [quota, setQuota] = useState<AiQuota | null>(null);
+  const [draft, setDraft] = useState<AiImageDraft | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const aiSkills = skills.filter(s => ["edu-chem-reaction", "edu-analytic-geometry"].includes(s.id));
+
+  useEffect(() => { api<{ quota: AiQuota }>("/api/ai/quota").then(d => setQuota(d.quota)).catch(() => {}); }, []);
+
+  async function submitText() {
+    if (!content.trim()) { setError("请输入题干或方程"); return; }
+    setBusy(true); setError("");
+    try {
+      await api("/api/ai/jobs", {
+        method: "POST",
+        body: JSON.stringify({ inputMode: mode, content, skillHint, idempotencyKey: `web-${Date.now()}-${Math.random().toString(16).slice(2)}` })
+      });
+      onCreated();
+    } catch (e: any) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+
+  async function uploadImage(file: File) {
+    setBusy(true); setError("");
+    try {
+      const imageBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("读取图片失败"));
+        reader.readAsDataURL(file);
+      });
+      const result = await api<{ draft: AiImageDraft }>("/api/ai/image-drafts", {
+        method: "POST",
+        body: JSON.stringify({ imageBase64, mimeType: file.type, skillHint })
+      });
+      setDraft(result.draft);
+    } catch (e: any) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+
+  function updateDraftField(key: string, value: string) {
+    if (!draft) return;
+    setDraft({ ...draft, editable: { ...draft.editable, [key]: value } });
+  }
+
+  async function confirmDraft() {
+    if (!draft) return;
+    setBusy(true); setError("");
+    try {
+      await api(`/api/ai/image-drafts/${draft.id}/confirm`, { method: "POST", body: JSON.stringify({ editable: draft.editable }) });
+      onCreated();
+    } catch (e: any) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div style={{ maxWidth: 720, margin: "0 auto" }}>
+      <div className="flex items-center justify-between mb-16">
+        <div><h1 className="page-title">AI 生成课件</h1><p className="page-subtitle">输入题干、方程或上传题目图片，确认识别结果后生成课件。</p></div>
+        {quota && <span className="badge badge-succeeded">今日剩余 {quota.remaining}/{quota.limit}</span>}
+      </div>
+      {error && <div className="alert alert-error">{error}</div>}
+      <div className="card">
+        <div className="auth-tabs">
+          {(["text", "equation", "image"] as const).map(item => <button key={item} className={`auth-tab ${mode === item ? "active" : ""}`} onClick={() => { setMode(item); setError(""); }}>{item === "text" ? "文本" : item === "equation" ? "方程/式子" : "图片"}</button>)}
+        </div>
+        <div className="form-group"><label className="form-label">学科</label><select className="form-select" value={skillHint} onChange={e => setSkillHint(e.target.value)}>{aiSkills.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
+        {mode !== "image" ? <>
+          <div className="form-group"><label className="form-label">{mode === "text" ? "题干" : "方程或式子"}</label><textarea className="input" rows={8} value={content} onChange={e => setContent(e.target.value)} placeholder={mode === "text" ? "例如：求椭圆上点的向量数量积范围" : "例如：C + O2 -> CO2"} /></div>
+          <button className="btn btn-primary" onClick={submitText} disabled={busy}>{busy ? <Loader2 size={16} className="spin" /> : <Wand2 size={16} />} 创建 AI 任务</button>
+        </> : <>
+          <div className="form-group"><label className="form-label">题目图片</label><input className="input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={busy} onChange={e => { const file = e.target.files?.[0]; if (file) uploadImage(file); }} /></div>
+          {draft && <div className="card" style={{ marginTop: 16 }}>
+            <div className="flex items-center justify-between mb-16"><strong>识别草稿</strong><span className="badge">置信度 {draft.confidence == null ? "-" : `${Math.round(draft.confidence * 100)}%`}</span></div>
+            {draft.warnings.map((warning, i) => <div className="alert alert-error" key={i}>{warning}</div>)}
+            {(["problemText", "equation", "conditions", "ask"] as const).map(key => <div className="form-group" key={key}><label className="form-label">{{ problemText: "题干", equation: "方程", conditions: "条件", ask: "问题" }[key]}</label><textarea className="input" rows={key === "problemText" ? 5 : 2} value={String(draft.editable[key] || "")} onChange={e => updateDraftField(key, e.target.value)} /></div>)}
+            <button className="btn btn-primary" onClick={confirmDraft} disabled={busy || draft.status !== "pending_confirm"}>{busy ? <Loader2 size={16} className="spin" /> : <Check size={16} />} 确认并生成</button>
+          </div>}
+        </>}
+      </div>
+    </div>
+  );
+}
+
 function JobsView({ jobs, skills, onView, onRefresh, onCancel, onRetry }: { jobs: GenerationJob[]; skills: Skill[]; onView: (id: string) => void; onRefresh: () => void; onCancel: (id: string) => Promise<unknown>; onRetry: (id: string) => Promise<unknown> }) {
   const [filter, setFilter] = useState<string>("all");
   const filtered = filter === "all" ? jobs : jobs.filter(j => j.status === filter);
@@ -319,7 +408,7 @@ function JobsView({ jobs, skills, onView, onRefresh, onCancel, onRetry }: { jobs
               <div className="flex items-center justify-between mb-16">
                 <div>
                   <div style={{ fontWeight: 600 }}>{j.title || problemName(skills, j.skillId, j.problemType)}</div>
-                  <div style={{ fontSize: 13, color: "var(--text-muted)" }}>{skillName(skills, j.skillId)} · {problemName(skills, j.skillId, j.problemType)} · {timeAgo(j.createdAt)}</div>
+                  <div style={{ fontSize: 13, color: "var(--text-muted)" }}>{j.kind === "ai" ? "AI 生成" : skillName(skills, j.skillId)} · {problemName(skills, j.skillId, j.problemType)} · {timeAgo(j.createdAt)}</div>
                 </div>
                 <Badge status={j.status} />
               </div>
@@ -327,6 +416,8 @@ function JobsView({ jobs, skills, onView, onRefresh, onCancel, onRetry }: { jobs
                 <div className="progress-bar mb-16"><div className="progress-fill" style={{ width: `${j.progress}%` }} /></div>
               )}
               <div style={{ fontSize: 13, color: "var(--text-muted)" }}>{j.currentStage}{j.errorMessage ? ` — ${j.errorMessage}` : ""}</div>
+              {j.errorCode && <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>错误码：{j.errorCode}</div>}
+              {j.validationTrace && <details style={{ marginTop: 8, fontSize: 12 }}><summary>查看校验轨迹</summary><pre style={{ whiteSpace: "pre-wrap", maxHeight: 180, overflow: "auto" }}>{JSON.stringify(j.validationTrace, null, 2)}</pre></details>}
               {(j.status === "queued" || j.status === "running") && <button className="btn btn-sm btn-danger" style={{ marginTop: 8 }} onClick={() => onCancel(j.id)}>取消</button>}
               {(j.status === "failed" || j.status === "cancelled") && <button className="btn btn-sm btn-secondary" style={{ marginTop: 8 }} onClick={() => onRetry(j.id)}>重试</button>}
               {j.status === "succeeded" && j.resultLessonId && (

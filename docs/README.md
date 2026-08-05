@@ -13,11 +13,10 @@
 
 | 文档 | 路径 |
 |------|------|
-| Phase3 架构与 API 草案 | [planning/phase3-architecture-api.md](./planning/phase3-architecture-api.md) |
+| Phase3 架构与 API 基线/规划 | [planning/phase3-architecture-api.md](./planning/phase3-architecture-api.md) |
 | 解几/立几 Spec 字段表 | [planning/spec-fields-analytic-solid.md](./planning/spec-fields-analytic-solid.md) |
 | 平台 v1 归档 | `planning/*platform-v1*` |
 
 ## 仓库根过程文件
 
 - `task_plan.md` / `progress.md` / `findings.md`：迭代计划与进展
-

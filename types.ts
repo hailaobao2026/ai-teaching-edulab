@@ -1,6 +1,7 @@
 export type AppView =
   | 'home'
   | 'create'
+  | 'ai-create'
   | 'jobs'
   | 'lessons'
   | 'my-lessons'
@@ -55,6 +56,39 @@ export interface GenerationJob {
   resultLessonId?: string | null;
   createdAt: string;
   updatedAt: string;
+  kind?: 'fixed' | 'ai';
+  inputMode?: string;
+  errorCode?: string;
+  validationTrace?: unknown;
+}
+
+export interface AiQuota {
+  role: UserRole;
+  date: string;
+  limit: number;
+  used: number;
+  remaining: number;
+  enabled: boolean;
+}
+
+export interface AiImageDraft {
+  id: string;
+  status: string;
+  skillHint: string;
+  assetPath: string;
+  confidence: number | null;
+  editable: {
+    skillId?: string;
+    problemText?: string;
+    equation?: string;
+    conditions?: string;
+    ask?: string;
+    language?: string;
+    [key: string]: unknown;
+  };
+  warnings: string[];
+  confirmedJobId?: string | null;
+  expiresAt?: string;
 }
 
 export interface Lesson {

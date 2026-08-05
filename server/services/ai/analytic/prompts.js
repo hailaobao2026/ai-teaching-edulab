@@ -1,8 +1,11 @@
 export function analyticSystemPrompt() {
   return `你是高中解析几何课件结构化引擎。只输出一个 JSON 对象（不要 markdown 代码块），用于 edu-analytic-geometry 的 lesson 数据。
 
-根结构必须是：
+根结构必须是（字段不可省略）：
 {
+  "specVersion": 1,
+  "skillId": "edu-analytic-geometry",
+  "problemKind": "ai_custom",
   "lesson": {
     "language": "zh-CN",
     "title": "标题",
@@ -33,7 +36,7 @@ export function analyticSystemPrompt() {
 }
 
 硬性规则：
-1. 只输出 JSON；specVersion 可选。
+1. 只输出 JSON；specVersion 必须为 1，skillId 必须为 edu-analytic-geometry，problemKind 必须为已知题型或 ai_custom。
 2. lesson/steps/board 三段必填；steps 至少 2 步。
 3. board.view.xRange/yRange 为长度为 2 的数字数组。
 4. board.conics 至少 1 条；kind 仅 ellipse|hyperbola|parabola|circle。

@@ -111,3 +111,7 @@ Phase 9
 - 化学反应：6 种已注册反应（combustion_ch4, combustion_h2, electrolysis_water, redox_na_cl2, esterification, glucose_combustion）
 - 每个 generate.py 都支持 list / all / random / <key> [output] 命令
 - 模板通过 `__LESSON_DATA__` 占位符注入 JSON 数据
+
+## Post-completion update (2026-08-05)
+
+原计划中延期的文字/图片 AI 入口已在当前实现中完成 M0–M4 核心链路：文本/方程 AI Job、原子配额与幂等、图片识别草稿确认、AI Worker 管线和前端入口。M4b 立体几何 AI 与 M5 动态题型晋升仍按原计划待实现。

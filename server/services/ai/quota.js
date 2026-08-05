@@ -1,13 +1,13 @@
-import { getAiDailyUsage, incrementAiDailyUsage } from '../../db.js';
+import { getAiDailyUsage, consumeAiDailyQuota } from '../../db.js';
 import { getAiRuntimeConfig, quotaLimitForRole } from './config.js';
 
-function todayKey(date = new Date()) {
+export function quotaDate(date = new Date()) {
   return date.toISOString().slice(0, 10);
 }
 
 export async function getQuotaStatus(user) {
   const aiConfig = await getAiRuntimeConfig();
-  const date = todayKey();
+  const date = quotaDate();
   const limit = quotaLimitForRole(aiConfig, user.role);
   const used = await getAiDailyUsage(user.id, date);
   const remaining = Math.max(0, limit - used);
@@ -37,16 +37,9 @@ export async function consumeAiQuota(user) {
     err.code = 'AI_ROLE_FORBIDDEN';
     throw err;
   }
-  const date = todayKey();
+  const date = quotaDate();
   const limit = quotaLimitForRole(aiConfig, user.role);
-  const used = await getAiDailyUsage(user.id, date);
-  if (used >= limit) {
-    const err = new Error('今日 AI 生成次数已达上限');
-    err.code = 'QUOTA_EXCEEDED';
-    err.quota = { date, limit, used, remaining: 0 };
-    throw err;
-  }
-  const next = await incrementAiDailyUsage(user.id, date);
+  const next = await consumeAiDailyQuota(user.id, date, limit);
   return {
     role: user.role,
     date,

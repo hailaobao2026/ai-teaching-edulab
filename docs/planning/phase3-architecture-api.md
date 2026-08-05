@@ -1,10 +1,10 @@
 # Phase 3: 架构 / API 草案
 
-> 状态：草案（可评审，尚未编码）  
+> 状态：实现基线（核心链路已编码；本文保留规划与未实现项）
 > 范围：化学 + 数学（解析几何优先 → 立体几何）  
 > 通道：sub2api（服务端）  
 > 入口：文本 → 方程/式子 → 图片（图片必须确认后生成）  
-> 权限：teacher + student；配额默认 10 / 50  
+> 权限：student + teacher + admin（可配置）；配额默认 10 / 50 / 200
 > 分子库：全自动扩展  
 > 晋升题型：M5
 
@@ -72,18 +72,18 @@
 | 模块 | 路径建议 | 职责 |
 |------|----------|------|
 | Sub2ApiClient | `server/services/llm/sub2apiClient.js` | chat/vision 调用、超时、重试、usage 记录 |
-| PromptRegistry | `server/services/llm/prompts/*` | 各 skill 系统提示与 JSON schema 说明 |
-| IntentRouter | `server/services/ai/intentRouter.js` | text/equation/imageDraft → skillId |
-| SpecGenerators | `server/services/ai/generators/{chem,analytic,solid}.js` | LLM → Spec |
-| SpecRepairLoop | `server/services/ai/repairLoop.js` | 校验错误回灌 LLM，最多 N 次 |
-| ChemValidator | `server/services/ai/validate/chem.js` | schema + 调 Python kernel |
-| AnalyticValidator | `.../validate/analytic.js` | schema + analytic 校验/试渲染 |
-| SolidValidator | `.../validate/solid.js` | schema + geometry 校验/试渲染 |
-| MoleculeAutoExtender | `server/services/ai/moleculeExtender.js` | 缺 species → LLM 分子定义 → 自检 → 持久化 |
-| ImageUnderstander | `server/services/ai/imageUnderstand.js` | 图片 → 结构化 draft（未出课） |
-| QuotaService | `server/services/quota.js` | 日配额扣减/查询 |
-| AiJobOrchestrator | `server/services/ai/orchestrator.js` | 串联阶段、写 progress |
-| DynamicCatalog | `server/services/dynamicCatalog.js` | M5 晋升题型 |
+| PromptRegistry | `server/services/ai/{chem,analytic}/prompts.js` | 各 skill 系统提示与 JSON schema 说明 |
+| IntentRouter | `server/workers/lessonWorker.js` + 各 pipeline 路由函数 | text/equation → skillId |
+| SpecGenerators | `server/services/ai/{chem,analytic}/llmSpec.js` | LLM → Spec |
+| SpecRepairLoop | `server/services/ai/{chem,analytic}/pipeline.js` | 校验错误回灌 LLM，最多 N 次 |
+| ChemValidator | `server/services/ai/chem/validateRender.js` | schema + 调 Python kernel |
+| AnalyticValidator | `server/services/ai/analytic/validateRender.js` | schema + Python 校验/渲染 |
+| SolidValidator | M4b 规划项 | 尚未实现 |
+| MoleculeAutoExtender | `server/services/ai/chem/moleculeStore.js` + pipeline | 缺 species → LLM 分子定义 → 自检 → 持久化 |
+| ImageUnderstander | `server/services/ai/image/recognize.js` | 图片 → 结构化 draft（未出课） |
+| QuotaService | `server/services/ai/quota.js` + `server/db.js` | 日配额查询与原子 Job 创建 |
+| AiJobOrchestrator | `server/workers/lessonWorker.js` | 串联阶段、写 progress |
+| DynamicCatalog | M5 规划项 | 尚未实现 |
 | skill override root | `skills/` 或 `vendor/edulab-skills/` | 可写分子库与扩展 generate，避免只改 node_modules |
 
 ---
@@ -97,24 +97,23 @@ POST /api/ai/jobs
   { inputMode: "text"|"equation", content, skillHint? }
         │
         ├─ auth + role 允许 AI
-        ├─ quota.tryConsume(user)  // 创建 job 即计数（已定口径）
-        ├─ createJob(kind=ai, status=queued)
+        ├─ createAiJob()  // 事务内完成幂等检查、配额预占与创建
         └─ 202 { job }
 
 Worker:
-  stage=route      → IntentRouter（skillHint 可跳过/校验）
-  stage=generate   → SpecGenerator(skill)
-  stage=validate   → Validator；失败 → repairLoop（≤N）
-  stage=extend_mol → 仅 chem 缺分子时 MoleculeAutoExtender
-  stage=render     → kernel assemble + template / generate 适配
-  stage=persist    → lesson + assets
+  stage=routing            → inferAiSkillHint + skill route
+  stage=generating_spec   → SpecGenerator(skill)
+  stage=validating         → Validator；失败 → repairLoop（≤N）
+  stage=extending_molecules → 仅 chem 缺分子时 MoleculeAutoExtender
+  stage=rendering          → kernel assemble + template / generate 适配
+  stage=persisting         → lesson + assets
   status=succeeded | failed
 ```
 
 ### 4.2 图片（强制确认）
 
 ```text
-1) POST /api/ai/image-drafts  (multipart 或 assetId)
+1) POST /api/ai/image-drafts  (multipart file 或 JSON imageBase64/imageUrl)
      → 不计「生成配额」或计「识别配额」二选一：默认 **不计生成配额**
      → Vision/OCR+LLM → draft
      → 返回 draftId + 可编辑字段 + confidence
@@ -150,11 +149,11 @@ POST /api/jobs { skillId, problemType, params }
 | `problem_type` | string | fixed 必填；ai 可用 `ai_dynamic` 或最终晋升 key |
 | `params` | JSON | 兼容旧参数 |
 | `source_text` | text | 原始文本/方程 |
-| `source_asset_id` | string? | 图片资源 |
+| `source_asset_id` | string? | 图片资源 ID 或已落盘路径 |
 | `draft_id` | string? | 图片草稿 |
 | `skill_hint` | string? | 用户/识别提示 |
 | `spec` | JSON? | 最终通过校验的 spec |
-| `spec_versions` | JSON? | 每次 LLM/修复快照（可裁剪） |
+| `spec_versions` | JSON? | 规划字段；当前实现使用 `spec` 保存最终/失败快照 |
 | `validation_trace` | JSON? | 错误与重试轨迹 |
 | `molecule_extensions` | JSON? | 本次自动新增 species 列表 |
 | `ai_meta` | JSON | model, usage, attempts, routeConfidence, provider=sub2api |
@@ -255,7 +254,7 @@ Request:
 
 `inputMode=equation` 时 `content` 为方程/几何条件式字符串。
 
-Response `202`:
+Response `202`（首次创建；幂等复用时为 `200`）:
 ```json
 {
   "job": {
@@ -264,6 +263,7 @@ Response `202`:
     "status": "queued",
     "inputMode": "text",
     "progress": 0,
+    "reused": false,
     "quota": { "used": 4, "limit": 10, "remaining": 6 }
   }
 }
@@ -285,7 +285,7 @@ Response `202`:
     "id": "job_xxx",
     "kind": "ai",
     "status": "running",
-    "currentStage": "validate",
+    "currentStage": "validating",
     "progress": 55,
     "skillId": "edu-chem-reaction",
     "inputMode": "equation",
@@ -302,8 +302,9 @@ Response `202`:
 ### 6.4 图片草稿
 
 #### `POST /api/ai/image-drafts`
-- `multipart/form-data`: `file` + 可选 `skillHint`  
-或 JSON：`{ "assetId": "..." }`
+- `multipart/form-data`: `file` + 可选 `skillHint`、`note`
+- JSON：`imageBase64` 或 `imageUrl` + 可选 `skillHint`、`note`
+- 图片最大 5MB，服务端校验 MIME 与文件头；识别草稿不提供无图旁路
 
 Response `201`:
 ```json
@@ -335,7 +336,7 @@ Response `201`:
 ```json
 { "editable": { "/* 可带最终确认快照 */" } }
 ```
-Response `202`: `{ "job": { ... } }`  // 创建 AI job，计配额
+Response `202`（首次确认）或 `200`（幂等复用）：`{ "job": { ... }, "reused": false, "quota": { ... } }`
 
 #### `POST /api/ai/image-drafts/:id/discard`
 
@@ -392,7 +393,7 @@ AI lesson 元数据可在 summary 或扩展字段标记 `source=ai`。
 |-------|------|----------------|
 | `queued` | 等待 | 0 |
 | `routing` | 定 skill | 10 |
-| `understanding` | 图片已在 draft 完成；job 内可跳过 | 15 |
+| `understanding` | 规划阶段；当前图片识别在 draft 阶段完成，不写入 Job stage | - |
 | `generating_spec` | LLM 出 spec | 35 |
 | `validating` | schema+kernel | 55 |
 | `repairing` | 带错误重试 | 55–70 |
@@ -491,7 +492,10 @@ on ChemValidate missing species S:
 |------|-----|
 | student 默认 | 10 AI jobs / 日 |
 | teacher 默认 | 50 / 日 |
+| admin 默认 | 200 / 日 |
 | 计数点 | **创建 AI job 成功入库时 +1**（文本/方程 POST；图片 confirm） |
+| 原子性 | 配额预占、幂等检查和 Job 入库在 `createAiJob` 同一事务/文件锁内完成 |
+| 幂等复用 | 相同用户和 `idempotencyKey` 返回已有 Job，不重复计数 |
 | 图片 draft | 默认不计生成配额；可另加 `imageDraftPerDay` 防刷（如 20） |
 | 现有 `rateLimit('jobs')` | AI 接口单独 `rateLimit('ai_jobs')` |
 
@@ -500,7 +504,7 @@ on ChemValidate missing species S:
 ## 12. 安全
 
 1. 前端无 Key；所有 LLM 服务端。  
-2. LLM 输出只走 JSON parse + schema；拒绝代码执行字段。  
+2. LLM 输出只走 JSON parse + schema；拒绝代码执行字段，课件 HTML 经过白名单净化。
 3. Prompt 注入：系统提示固定角色；用户内容当数据。  
 4. 图片大小/类型限制；病毒扫描可选。  
 5. 化学危险反应：可提示“教学演示，勿实验”。  
@@ -525,7 +529,7 @@ on ChemValidate missing species S:
 |----------|-----------|
 | `POST /api/jobs` | 不变，仅 fixed |
 | `GET /api/jobs` | 增加 kind 过滤与字段 |
-| `POST /api/jobs/:id/retry` | ai job 允许从 failed 重试（再计配额？**建议重试另计或半价策略：默认再计 1 次**） |
+| `POST /api/jobs/:id/retry` | ai job 允许从 failed 重试；当前重试不重新预占配额 |
 | `GET /api/catalog/skills` | M5 后合并动态题 |
 | lessons/review | 复用 |
 
@@ -550,7 +554,7 @@ on ChemValidate missing species S:
 1. Worker 进程：同 `lessonWorker` 分流 vs 独立 `aiWorker`（推荐先同进程按 kind 分流，减部署复杂度）。  
 2. 解析几何校验：纯 Node schema vs 调 Python kernel（推荐 **Python 同源校验**）。  
 3. 分子定义存储：JSON 数据仓 vs 生成 py 文件（推荐 **JSON 数据仓 + 受控解释器**）。  
-4. 重试是否再计配额：默认 **计 1 次**。  
+4. 重试配额：当前 `retryJob` 不重新预占 AI 配额。
 5. idempotencyKey：短时去重防双击。  
 
 ---
@@ -564,12 +568,11 @@ on ChemValidate missing species S:
 
 ---
 
-## 18. 下一步（Phase 3 收尾 → 可开编码）
+## 18. 后续工作（核心链路已实现）
 
-1. 评审本草案，拍板 §16 五个实现选择。  
-2. 抽出 AnalyticLessonSpec / SolidLessonSpec 字段表（对照现有 build 输出）。  
-3. 冻结 OpenAPI 风格路径与错误码表。  
-4. 启动 M0 编码。
+1. 完善 M4b 立体几何 AI 管线。
+2. 实现 M5 动态题型晋升与目录合并。
+3. 补充 MySQL 集成测试和上传病毒扫描。
 
 ---
 
@@ -580,7 +583,7 @@ on ChemValidate missing species S:
 | 1 | Worker | **同进程按 `kind` 分流**（`lessonWorker`） |
 | 2 | 数学校验 | **Python 同源 kernel 校验** |
 | 3 | 分子存储 | **JSON 数据仓 + 受控解释器** |
-| 4 | 失败重试配额 | **再计 1 次** |
+| 4 | 失败重试配额 | 当前 `retryJob` 不重新预占 AI 配额；如调整需同步 API 与数据字典 |
 | 5 | idempotencyKey | **启用**（短时去重） |
 
 配套文档：`docs/planning/spec-fields-analytic-solid.md`

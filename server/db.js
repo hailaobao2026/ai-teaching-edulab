@@ -191,7 +191,7 @@ async function initMysqlSchema() {
     "ALTER TABLE generation_jobs ADD COLUMN validation_trace JSON NULL",
     "ALTER TABLE generation_jobs ADD COLUMN molecule_extensions JSON NULL",
     "ALTER TABLE generation_jobs ADD COLUMN ai_meta JSON NULL",
-    "CREATE INDEX idx_jobs_idempotency ON generation_jobs (user_id, idempotency_key)"
+    "CREATE UNIQUE INDEX uq_jobs_idempotency ON generation_jobs (user_id, idempotency_key)"
   ]) { try { await pool.query(statement); } catch (error) { if (error.code !== 'ER_DUP_FIELDNAME' && error.code !== 'ER_DUP_KEYNAME') throw error; } }
   await pool.query(`CREATE TABLE IF NOT EXISTS ai_daily_quota (
     user_id VARCHAR(64) NOT NULL,
@@ -438,7 +438,7 @@ export async function deleteUserSessions(userId) {
 
 // ---------- Jobs ----------
 
-export async function createJob({
+function buildJobRecord({
   userId,
   skillId,
   problemType,
@@ -454,7 +454,7 @@ export async function createJob({
   aiMeta = null,
   spec = null
 }) {
-  const job = {
+  return {
     id: generateId('job'),
     user_id: userId,
     status: 'queued',
@@ -483,28 +483,141 @@ export async function createJob({
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
   };
+}
+
+async function insertJob(job, executor = pool) {
+  await executor.query(
+    `INSERT INTO generation_jobs (
+       id, user_id, status, progress, current_stage, skill_id, problem_type, params, title,
+       worker_token, lease_until, kind, input_mode, source_text, source_asset_id, draft_id,
+       skill_hint, idempotency_key, error_code, spec, validation_trace, molecule_extensions, ai_meta
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      job.id, job.user_id, job.status, job.progress, job.current_stage, job.skill_id, job.problem_type,
+      JSON.stringify(job.params), job.title, job.kind, job.input_mode, job.source_text, job.source_asset_id,
+      job.draft_id, job.skill_hint, job.idempotency_key, job.error_code,
+      job.spec ? JSON.stringify(job.spec) : null,
+      null,
+      null,
+      job.ai_meta ? JSON.stringify(job.ai_meta) : null
+    ]
+  );
+}
+
+export async function createJob(fields) {
+  const job = buildJobRecord(fields);
   if (useMysql) {
-    await pool.query(
-      `INSERT INTO generation_jobs (
-         id, user_id, status, progress, current_stage, skill_id, problem_type, params, title,
-         worker_token, lease_until, kind, input_mode, source_text, source_asset_id, draft_id,
-         skill_hint, idempotency_key, error_code, spec, validation_trace, molecule_extensions, ai_meta
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        job.id, job.user_id, job.status, job.progress, job.current_stage, job.skill_id, job.problem_type,
-        JSON.stringify(job.params), job.title, job.kind, job.input_mode, job.source_text, job.source_asset_id,
-        job.draft_id, job.skill_hint, job.idempotency_key, job.error_code,
-        job.spec ? JSON.stringify(job.spec) : null,
-        null,
-        null,
-        job.ai_meta ? JSON.stringify(job.ai_meta) : null
-      ]
-    );
+    await insertJob(job);
   } else {
     const lockFd = acquireMemoryLock();
     try { loadMemory(); memory.jobs.unshift(job); saveMemory(lockFd); } finally { releaseMemoryLock(lockFd); }
   }
   return mapJob(job);
+}
+
+function quotaExceededError({ usageDate, quotaLimit, used }) {
+  const error = new Error('今日 AI 生成次数已达上限');
+  error.code = 'QUOTA_EXCEEDED';
+  error.quota = { date: usageDate, limit: quotaLimit, used, remaining: 0 };
+  return error;
+}
+
+function quotaResult({ userId, usageDate, quotaLimit, used }) {
+  return {
+    userId,
+    date: usageDate,
+    limit: quotaLimit,
+    used,
+    remaining: Math.max(0, quotaLimit - used)
+  };
+}
+
+/** Atomically reserve quota and create an AI job, including idempotency. */
+export async function createAiJob({
+  userId,
+  quotaLimit,
+  usageDate = new Date().toISOString().slice(0, 10),
+  ...fields
+}) {
+  const limit = Math.max(0, Number(quotaLimit));
+  const job = buildJobRecord({ ...fields, userId, kind: 'ai' });
+
+  if (useMysql) {
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      if (job.idempotency_key) {
+        const [existingRows] = await connection.query(
+          'SELECT * FROM generation_jobs WHERE user_id = ? AND idempotency_key = ? FOR UPDATE',
+          [userId, job.idempotency_key]
+        );
+        if (existingRows[0]) {
+          const [[usage]] = await connection.query(
+            'SELECT ai_jobs_created FROM ai_daily_quota WHERE user_id = ? AND usage_date = ?',
+            [userId, usageDate]
+          );
+          await connection.commit();
+          const used = Number(usage?.ai_jobs_created || 0);
+          return { job: mapJob(existingRows[0]), reused: true, quota: quotaResult({ userId, usageDate, quotaLimit: limit, used }) };
+        }
+      }
+      await connection.query(
+        'INSERT INTO ai_daily_quota (user_id, usage_date, ai_jobs_created) VALUES (?, ?, 0) ON DUPLICATE KEY UPDATE user_id = user_id',
+        [userId, usageDate]
+      );
+      const [[usage]] = await connection.query(
+        'SELECT ai_jobs_created FROM ai_daily_quota WHERE user_id = ? AND usage_date = ? FOR UPDATE',
+        [userId, usageDate]
+      );
+      const used = Number(usage?.ai_jobs_created || 0);
+      if (used >= limit) throw quotaExceededError({ usageDate, quotaLimit: limit, used });
+      await connection.query(
+        'UPDATE ai_daily_quota SET ai_jobs_created = ai_jobs_created + 1 WHERE user_id = ? AND usage_date = ?',
+        [userId, usageDate]
+      );
+      await insertJob(job, connection);
+      await connection.commit();
+      return { job: mapJob(job), reused: false, quota: quotaResult({ userId, usageDate, quotaLimit: limit, used: used + 1 }) };
+    } catch (error) {
+      await connection.rollback();
+      if (error.code === 'ER_DUP_ENTRY' && job.idempotency_key) {
+        const [rows] = await pool.query(
+          'SELECT * FROM generation_jobs WHERE user_id = ? AND idempotency_key = ? ORDER BY created_at DESC LIMIT 1',
+          [userId, job.idempotency_key]
+        );
+        if (rows[0]) {
+          const used = await getAiDailyUsage(userId, usageDate);
+          return { job: mapJob(rows[0]), reused: true, quota: quotaResult({ userId, usageDate, quotaLimit: limit, used }) };
+        }
+      }
+      throw error;
+    } finally { connection.release(); }
+  }
+
+  const lockFd = acquireMemoryLock();
+  try {
+    loadMemory();
+    if (job.idempotency_key) {
+      const existing = memory.jobs.find(item => item.user_id === userId && item.idempotency_key === job.idempotency_key);
+      if (existing) {
+        const usage = memory.aiQuota.find(item => item.user_id === userId && item.usage_date === usageDate);
+        const used = Number(usage?.ai_jobs_created || 0);
+        return { job: mapJob(existing), reused: true, quota: quotaResult({ userId, usageDate, quotaLimit: limit, used }) };
+      }
+    }
+    let usage = memory.aiQuota.find(item => item.user_id === userId && item.usage_date === usageDate);
+    if (!usage) {
+      usage = { user_id: userId, usage_date: usageDate, ai_jobs_created: 0, updated_at: new Date().toISOString() };
+      memory.aiQuota.push(usage);
+    }
+    const used = Number(usage.ai_jobs_created || 0);
+    if (used >= limit) throw quotaExceededError({ usageDate, quotaLimit: limit, used });
+    usage.ai_jobs_created = used + 1;
+    usage.updated_at = new Date().toISOString();
+    memory.jobs.unshift(job);
+    saveMemory(lockFd);
+    return { job: mapJob(job), reused: false, quota: quotaResult({ userId, usageDate, quotaLimit: limit, used: used + 1 }) };
+  } finally { releaseMemoryLock(lockFd); }
 }
 
 function parseJsonField(value, fallback) {
@@ -553,18 +666,22 @@ function mapJob(row) {
   };
 }
 
-export async function listJobs({ userId, isAdmin } = {}) {
+export async function listJobs({ userId, isAdmin, kind } = {}) {
   memReload();
   if (useMysql) {
     let sql = 'SELECT * FROM generation_jobs';
     const vals = [];
-    if (!isAdmin && userId) { sql += ' WHERE user_id = ?'; vals.push(userId); }
+    const conditions = [];
+    if (!isAdmin && userId) { conditions.push('user_id = ?'); vals.push(userId); }
+    if (kind) { conditions.push('kind = ?'); vals.push(kind); }
+    if (conditions.length) sql += ` WHERE ${conditions.join(' AND ')}`;
     sql += ' ORDER BY created_at DESC LIMIT 200';
     const [rows] = await pool.query(sql, vals);
     return rows.map(mapJob);
   }
   let jobs = memory.jobs;
   if (!isAdmin && userId) jobs = jobs.filter(j => j.user_id === userId);
+  if (kind) jobs = jobs.filter(j => j.kind === kind);
   return jobs.slice(0, 200).map(mapJob);
 }
 
@@ -955,6 +1072,50 @@ export async function incrementAiDailyUsage(userId, usageDate) {
   } finally { releaseMemoryLock(lockFd); }
 }
 
+export async function consumeAiDailyQuota(userId, usageDate, quotaLimit) {
+  const limit = Math.max(0, Number(quotaLimit));
+  if (useMysql) {
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await connection.query(
+        'INSERT INTO ai_daily_quota (user_id, usage_date, ai_jobs_created) VALUES (?, ?, 0) ON DUPLICATE KEY UPDATE user_id = user_id',
+        [userId, usageDate]
+      );
+      const [updated] = await connection.query(
+        'UPDATE ai_daily_quota SET ai_jobs_created = ai_jobs_created + 1 WHERE user_id = ? AND usage_date = ? AND ai_jobs_created < ?',
+        [userId, usageDate, limit]
+      );
+      const [[usage]] = await connection.query(
+        'SELECT ai_jobs_created FROM ai_daily_quota WHERE user_id = ? AND usage_date = ?',
+        [userId, usageDate]
+      );
+      const used = Number(usage?.ai_jobs_created || 0);
+      if (!updated.affectedRows) throw quotaExceededError({ usageDate, quotaLimit: limit, used });
+      await connection.commit();
+      return used;
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally { connection.release(); }
+  }
+  const lockFd = acquireMemoryLock();
+  try {
+    loadMemory();
+    let usage = memory.aiQuota.find(item => item.user_id === userId && item.usage_date === usageDate);
+    if (!usage) {
+      usage = { user_id: userId, usage_date: usageDate, ai_jobs_created: 0, updated_at: new Date().toISOString() };
+      memory.aiQuota.push(usage);
+    }
+    const used = Number(usage.ai_jobs_created || 0);
+    if (used >= limit) throw quotaExceededError({ usageDate, quotaLimit: limit, used });
+    usage.ai_jobs_created = used + 1;
+    usage.updated_at = new Date().toISOString();
+    saveMemory(lockFd);
+    return usage.ai_jobs_created;
+  } finally { releaseMemoryLock(lockFd); }
+}
+
 export async function findJobByIdempotencyKey(userId, idempotencyKey) {
   if (!idempotencyKey) return null;
   memReload();
@@ -1109,4 +1270,3 @@ export async function updateAiImageDraft(id, patch = {}) {
     return mapAiDraft(draft);
   } finally { releaseMemoryLock(lockFd); }
 }
-

@@ -28,16 +28,37 @@ export function guessExt(mimeType = '') {
   return 'png';
 }
 
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
+function hasImageSignature(buffer, mimeType) {
+  if (mimeType === 'image/png') return buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  if (mimeType === 'image/jpeg') return buffer.subarray(0, 3).equals(Buffer.from([255, 216, 255]));
+  if (mimeType === 'image/gif') return buffer.subarray(0, 6).toString('ascii') === 'GIF87a' || buffer.subarray(0, 6).toString('ascii') === 'GIF89a';
+  if (mimeType === 'image/webp') return buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP';
+  return false;
+}
+
 export function saveImageAsset({ draftId, base64, mimeType = 'image/png' }) {
   const root = imageUploadsRoot();
   fs.mkdirSync(root, { recursive: true });
-  const ext = guessExt(mimeType);
+  const normalizedMime = String(mimeType || '').toLowerCase().split(';', 1)[0];
+  if (!IMAGE_TYPES.has(normalizedMime)) {
+    const err = new Error('仅支持 PNG、JPEG、WebP 或 GIF 图片');
+    err.code = 'IMAGE_TYPE_UNSUPPORTED';
+    throw err;
+  }
+  const ext = guessExt(normalizedMime);
   const fileName = `${draftId || `img_${Date.now()}`}.${ext}`;
   const abs = path.join(root, fileName);
   const buf = Buffer.from(String(base64).replace(/^data:[^;]+;base64,/, ''), 'base64');
   if (!buf.length) {
     const err = new Error('图片内容为空');
     err.code = 'IMAGE_EMPTY';
+    throw err;
+  }
+  if (!hasImageSignature(buf, normalizedMime)) {
+    const err = new Error('图片文件格式与 MIME 类型不匹配');
+    err.code = 'IMAGE_SIGNATURE_INVALID';
     throw err;
   }
   const maxBytes = Math.max(100_000, Number(process.env.AI_IMAGE_MAX_BYTES || 5_000_000));
@@ -47,7 +68,7 @@ export function saveImageAsset({ draftId, base64, mimeType = 'image/png' }) {
     throw err;
   }
   fs.writeFileSync(abs, buf);
-  return { absPath: abs, relPath: path.relative(projectRoot, abs), bytes: buf.length, mimeType, fileName };
+  return { absPath: abs, relPath: path.relative(projectRoot, abs), bytes: buf.length, mimeType: normalizedMime, fileName };
 }
 
 function recognitionSystemPrompt() {

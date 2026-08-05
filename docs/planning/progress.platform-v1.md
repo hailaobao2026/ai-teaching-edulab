@@ -117,3 +117,11 @@ All 9 phases complete:
 - Fixed job field mapping, atomic MySQL claims, cancellation/retry semantics, stale-job recovery, configurable worker concurrency, and Python timeouts.
 - Added regression tests for cancellation, lesson visibility, retry, session expiry, and job mapping (11 tests total).
 - Added signed short-lived preview URLs, worker lease ownership and cancellation, memory DB locking for queue mutations, request limits, generic persisted errors, teacher review/catalog/assets APIs, and secret-injected Compose configuration.
+
+## AI Review Remediation (2026-08-05)
+
+- Completed M0–M4 core AI paths: atomic AI Job creation, daily quota reservation, idempotency reuse, text/equation routing, image draft confirmation, and AI stage progress.
+- Added multipart image upload, 5MB/MIME/file-signature validation, persisted draft asset paths, and Multer input error responses.
+- Added LLM HTML allowlist sanitization, stronger analytic Spec validation, canonical AI stages, and cancellation-aware upstream retry handling.
+- Frontend now exposes AI text/equation/image entry points, editable image drafts, quota status, error codes, and validation traces.
+- Verification: `npm test` 31/31 passed; `npm run build` passed; Node/Python syntax checks and `git diff --check` passed.

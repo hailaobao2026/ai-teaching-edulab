@@ -2,6 +2,7 @@
 import './loadEnv.js';
 import express from 'express';
 import cors from 'cors';
+import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -14,13 +15,13 @@ import {
   createJob, listJobs, getJob, cancelJob, retryJob,
   createLesson, listLessons, getLesson, updateLesson, deleteLesson, incrementLessonViews, getLessonByJobId,
   getStats, getSystemConfig, setSystemConfig, listProblemCatalog, setProblemCatalogEntry, listLessonAssets,
-  findJobByIdempotencyKey, createAiImageDraft, getAiImageDraft, updateAiImageDraft
+  createAiJob, createAiImageDraft, getAiImageDraft, updateAiImageDraft
 } from './db.js';
 import { publicUser, validateRegisterPayload, normalizeRole, ROLES, isAdmin, isTeacher } from './services/rbac.js';
 import { listSkills, getSkill, getProblemType, skillsInstalled } from './services/skillCatalog.js';
 import { healthCheck as sub2apiHealthCheck } from './services/llm/sub2apiClient.js';
-import { getAiRuntimeConfig, publicAiConfig, roleAllowedForAi } from './services/ai/config.js';
-import { getQuotaStatus, consumeAiQuota } from './services/ai/quota.js';
+import { getAiRuntimeConfig, publicAiConfig, roleAllowedForAi, quotaLimitForRole } from './services/ai/config.js';
+import { getQuotaStatus, consumeAiQuota, quotaDate } from './services/ai/quota.js';
 import { recognizeProblemFromImage, saveImageAsset, stripDataUrl, buildConfirmSourceText } from './services/ai/image/recognize.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -54,7 +55,8 @@ const corsOptions = corsOrigins.length
   ? { origin: corsOrigins }
   : (process.env.NODE_ENV === 'production' ? { origin: false } : undefined);
 app.use(cors(corsOptions));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '8mb' }));
+const imageUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 const rateBuckets = new Map();
 function rateLimit(name, limit, windowMs) {
@@ -191,7 +193,9 @@ app.post('/api/jobs', auth(true), rateLimit('jobs', 10, 60_000), async (req, res
 });
 
 app.get('/api/jobs', auth(true), async (req, res) => {
-  const jobs = await listJobs({ userId: req.user.id, isAdmin: isAdmin(req.user) });
+  const kind = req.query.kind ? String(req.query.kind) : '';
+  if (kind && !['ai', 'fixed'].includes(kind)) return res.status(400).json({ error: 'kind 仅支持 ai 或 fixed' });
+  const jobs = await listJobs({ userId: req.user.id, isAdmin: isAdmin(req.user), kind: kind || undefined });
   res.json({ jobs });
 });
 
@@ -363,37 +367,32 @@ app.post('/api/ai/jobs', auth(true), rateLimit('ai_jobs', 20, 60_000), async (re
   if (skillHint && !AI_SKILL_HINTS.has(skillHint)) return res.status(400).json({ error: 'skillHint 不合法' });
 
   const idempotencyKey = req.body?.idempotencyKey ? String(req.body.idempotencyKey).trim().slice(0, 128) : '';
-  if (idempotencyKey) {
-    const existing = await findJobByIdempotencyKey(req.user.id, idempotencyKey);
-    if (existing) return res.status(200).json({ job: existing, reused: true, quota: await getQuotaStatus(req.user) });
+  let created;
+  try {
+    created = await createAiJob({
+      userId: req.user.id,
+      quotaLimit: quotaLimitForRole(ai, req.user.role),
+      usageDate: quotaDate(),
+      skillId: skillHint || '',
+      problemType: 'ai_dynamic',
+      params: { options: req.body?.options || {} },
+      title: String(req.body?.options?.title || req.body?.title || '').slice(0, 200),
+      inputMode,
+      sourceText: content,
+      skillHint: skillHint || null,
+      idempotencyKey: idempotencyKey || null,
+      aiMeta: { provider: 'sub2api', pipeline: 'm0_skeleton', requestedAt: new Date().toISOString() }
+    });
   }
-
-  let quota;
-  try { quota = await consumeAiQuota(req.user); }
   catch (error) {
     if (error.code === 'QUOTA_EXCEEDED') return res.status(429).json({ error: error.message, code: error.code, quota: error.quota });
     if (error.code === 'AI_DISABLED' || error.code === 'AI_ROLE_FORBIDDEN') return res.status(403).json({ error: error.message, code: error.code });
     throw error;
   }
-
-  const title = String(req.body?.options?.title || req.body?.title || '').slice(0, 200);
-  const job = await createJob({
-    userId: req.user.id,
-    skillId: skillHint || '',
-    problemType: 'ai_dynamic',
-    params: { options: req.body?.options || {} },
-    title,
-    kind: 'ai',
-    inputMode,
-    sourceText: content,
-    skillHint: skillHint || null,
-    idempotencyKey: idempotencyKey || null,
-    aiMeta: { provider: 'sub2api', pipeline: 'm0_skeleton', requestedAt: new Date().toISOString() }
-  });
-  res.status(202).json({ job, quota });
+  res.status(created.reused ? 200 : 202).json({ job: created.job, reused: created.reused, quota: created.quota });
 });
 
-app.post('/api/ai/image-drafts', auth(true), rateLimit('ai_drafts', 30, 60_000), async (req, res) => {
+app.post('/api/ai/image-drafts', auth(true), rateLimit('ai_drafts', 30, 60_000), imageUpload.single('file'), async (req, res) => {
   const ai = await getAiRuntimeConfig();
   if (!ai.enabled) return res.status(403).json({ error: 'AI 生成未启用', code: 'AI_DISABLED' });
   if (!roleAllowedForAi(ai, req.user.role)) return res.status(403).json({ error: '当前角色不允许使用 AI 生成', code: 'AI_ROLE_FORBIDDEN' });
@@ -402,14 +401,15 @@ app.post('/api/ai/image-drafts', auth(true), rateLimit('ai_drafts', 30, 60_000),
   if (skillHint && !AI_SKILL_HINTS.has(skillHint)) return res.status(400).json({ error: 'skillHint 不合法' });
   const note = String(req.body?.note || req.body?.content || '').trim();
   const imageUrl = String(req.body?.imageUrl || req.body?.url || '').trim();
-  const rawImage = req.body?.imageBase64 || req.body?.image || req.body?.base64 || '';
-  const skipVision = Boolean(req.body?.skipVision);
+  const rawImage = req.file?.buffer
+    ? req.file.buffer.toString('base64')
+    : (req.body?.imageBase64 || req.body?.image || req.body?.base64 || '');
 
-  if (!imageUrl && !rawImage && !note) {
-    return res.status(400).json({ error: '请提供 imageBase64 / imageUrl，或至少 note 文本（调试用）' });
+  if (!imageUrl && !rawImage) {
+    return res.status(400).json({ error: '请提供 multipart 文件、imageBase64 或 imageUrl' });
   }
 
-  let mimeType = String(req.body?.mimeType || 'image/png');
+  let mimeType = String(req.file?.mimetype || req.body?.mimeType || 'image/png');
   let base64 = '';
   if (rawImage) {
     const parsed = stripDataUrl(rawImage);
@@ -422,9 +422,9 @@ app.post('/api/ai/image-drafts', auth(true), rateLimit('ai_drafts', 30, 60_000),
   let warnings = [];
   let editable = { skillId: skillHint || '', problemText: note || '', equation: '', conditions: '', ask: '' };
   let confidence = 0;
-  let assetPath = String(req.body?.assetPath || '');
+  let assetPath = imageUrl;
 
-  if (!skipVision && (imageUrl || base64)) {
+  if (imageUrl || base64) {
     try {
       recognition = await recognizeProblemFromImage({
         imageBase64: base64 || undefined,
@@ -450,9 +450,6 @@ app.post('/api/ai/image-drafts', auth(true), rateLimit('ai_drafts', 30, 60_000),
       confidence = 0;
       recognition = { error: error.message, code: error.code || 'VISION_FAILED' };
     }
-  } else {
-    warnings = ['未执行视觉识别（skipVision 或仅 note），请确认 editable 后生成'];
-    confidence = note ? 0.4 : 0;
   }
 
   const draft = await createAiImageDraft({
@@ -470,25 +467,13 @@ app.post('/api/ai/image-drafts', auth(true), rateLimit('ai_drafts', 30, 60_000),
     try {
       const saved = saveImageAsset({ draftId: draft.id, base64, mimeType });
       assetPath = saved.relPath || saved.absPath;
-      await updateAiImageDraft(draft.id, {
-        // keep editable/skill; only asset via raw path field not in patch map - store in editable too
-      });
-      // db patch lacks assetPath; update via editable meta + recreate not possible; use warnings note
-      // Extend update to support assetPath if needed
+      await updateAiImageDraft(draft.id, { assetPath });
     } catch (error) {
       warnings = [...(warnings || []), `图片落盘失败: ${error.message}`];
       await updateAiImageDraft(draft.id, { warnings });
     }
   }
 
-  const fresh = await getAiImageDraft(draft.id);
-  // attach assetPath into response (and persist if possible)
-  if (assetPath && assetPath !== fresh.assetPath) {
-    // best-effort: store on rawRecognition.assetPath by re-updating editable unchanged + warning
-    await updateAiImageDraft(draft.id, {
-      warnings: [...(fresh.warnings || []), `assetPath=${assetPath}`]
-    });
-  }
   res.status(201).json({ draft: await getAiImageDraft(draft.id), recognitionMeta: recognition ? {
     model: recognition.model,
     usage: recognition.usage,
@@ -537,30 +522,30 @@ app.post('/api/ai/image-drafts/:id/confirm', auth(true), rateLimit('ai_jobs', 20
     return res.status(400).json({ error: '立体几何图片生成将在 M4b 支持，请先改 skillId 为化学或解析几何', code: 'SOLID_IMAGE_PENDING' });
   }
 
-  let quota;
-  try { quota = await consumeAiQuota(req.user); }
-  catch (error) {
+  let created;
+  try {
+    created = await createAiJob({
+      userId: req.user.id,
+      quotaLimit: quotaLimitForRole(ai, req.user.role),
+      usageDate: quotaDate(),
+      skillId: skillHint || '',
+      problemType: 'ai_dynamic',
+      params: { editable, fromDraftId: draft.id },
+      title: String(editable.ask || editable.problemText || '图片识别生成').slice(0, 200),
+      inputMode: 'image',
+      sourceText: content,
+      sourceAssetId: draft.assetPath || null,
+      draftId: draft.id,
+      skillHint: skillHint || null,
+      idempotencyKey: `image-draft:${draft.id}`,
+      aiMeta: { provider: 'sub2api', pipeline: 'm4_image', fromDraft: true, requestedAt: new Date().toISOString() }
+    });
+  } catch (error) {
     if (error.code === 'QUOTA_EXCEEDED') return res.status(429).json({ error: error.message, code: error.code, quota: error.quota });
-    if (error.code === 'AI_DISABLED' || error.code === 'AI_ROLE_FORBIDDEN') return res.status(403).json({ error: error.message, code: error.code });
     throw error;
   }
-
-  await updateAiImageDraft(draft.id, { editable, skillHint, status: 'confirmed' });
-  const job = await createJob({
-    userId: req.user.id,
-    skillId: skillHint || '',
-    problemType: 'ai_dynamic',
-    params: { editable, fromDraftId: draft.id },
-    title: String(editable.ask || editable.problemText || '图片识别生成').slice(0, 200),
-    kind: 'ai',
-    inputMode: 'image',
-    sourceText: content,
-    draftId: draft.id,
-    skillHint: skillHint || null,
-    aiMeta: { provider: 'sub2api', pipeline: 'm4_image', fromDraft: true, requestedAt: new Date().toISOString() }
-  });
-  await updateAiImageDraft(draft.id, { confirmedJobId: job.id });
-  res.status(202).json({ job, quota, draft: await getAiImageDraft(draft.id) });
+  await updateAiImageDraft(draft.id, { editable, skillHint, status: 'confirmed', confirmedJobId: created.job.id });
+  res.status(created.reused ? 200 : 202).json({ job: created.job, reused: created.reused, quota: created.quota, draft: await getAiImageDraft(draft.id) });
 });
 
 app.post('/api/ai/image-drafts/:id/discard', auth(true), async (req, res) => {
@@ -700,6 +685,10 @@ if (fs.existsSync(distDir)) {
 // ---------- Error handler ----------
 app.use((err, _req, res, _next) => {
   console.error('[api] error:', err);
+  if (err instanceof multer.MulterError) {
+    const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+    return res.status(status).json({ error: err.code === 'LIMIT_FILE_SIZE' ? '图片超过 5MB 限制' : '图片上传格式或字段无效', code: err.code });
+  }
   res.status(500).json({ error: '服务器内部错误' });
 });
 

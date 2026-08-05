@@ -265,6 +265,6 @@ export function isChemAiJob(job) {
   const hint = job.skillHint || job.skillId || '';
   if (hint === 'edu-chem-reaction') return true;
   if (hint === 'edu-analytic-geometry' || hint === 'edu-solid-geometry') return false;
-  // auto: default chem for M1 when no math hint
-  return !hint || hint === 'auto' || hint === '';
+  // An empty/unknown hint must fail routing; the worker performs text inference first.
+  return false;
 }

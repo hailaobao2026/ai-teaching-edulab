@@ -19,6 +19,9 @@ const { isAnalyticAiJob, runAnalyticAiPipeline } = await import("../services/ai/
 const { isChemAiJob } = await import("../services/ai/chem/pipeline.js");
 
 const sampleSpec = {
+  specVersion: 1,
+  skillId: "edu-analytic-geometry",
+  problemKind: "ai_custom",
   lesson: {
     language: "zh-CN",
     title: "椭圆演示",
@@ -48,6 +51,7 @@ const sampleSpec = {
 test("m3 analytic - known problem matcher", () => {
   assert.equal(matchKnownAnalyticProblem("求椭圆上向量数量积的取值范围"), "ellipse_dot_range");
   assert.equal(matchKnownAnalyticProblem("双曲线离心率的取值范围"), "hyperbola_ecc_range");
+  assert.equal(matchKnownAnalyticProblem("椭圆离心率的取值范围"), null);
   assert.equal(matchKnownAnalyticProblem("完全无关的内容xyz"), null);
 });
 

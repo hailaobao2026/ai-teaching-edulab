@@ -63,6 +63,13 @@ def _validate_conic(c: dict, idx: int) -> None:
 def validate_spec(data: dict) -> dict:
     if not isinstance(data, dict):
         raise ValueError("spec 必须是对象")
+    if data.get("specVersion") != 1:
+        raise ValueError("specVersion 必须为 1")
+    if data.get("skillId") != "edu-analytic-geometry":
+        raise ValueError("skillId 必须为 edu-analytic-geometry")
+    problem_kind = str(data.get("problemKind") or "")
+    if not problem_kind:
+        raise ValueError("problemKind 必填")
     lesson = data.get("lesson")
     steps = data.get("steps")
     board = data.get("board")
@@ -77,6 +84,8 @@ def validate_spec(data: dict) -> dict:
         raise ValueError("lesson.title 必填")
     if not str(lesson.get("problem") or "").strip():
         raise ValueError("lesson.problem 必填")
+    if lesson.get("language") not in {"zh-CN", "en"}:
+        raise ValueError("lesson.language 必须为 zh-CN 或 en")
 
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
@@ -104,6 +113,16 @@ def validate_spec(data: dict) -> dict:
     points = board.get("points")
     if points is not None and not isinstance(points, dict):
         raise ValueError("board.points 必须是对象")
+    for key in ("derived", "readouts", "legend", "scalars"):
+        if key in board and not isinstance(board[key], list):
+            raise ValueError(f"board.{key} 必须是数组")
+    for name, point in (points or {}).items():
+        if not isinstance(point, dict):
+            raise ValueError(f"board.points.{name} 必须是对象")
+        if "xy" in point:
+            xy = _as_pair(point["xy"], f"board.points.{name}.xy")
+            if any(not (-1e9 < value < 1e9) for value in xy):
+                raise ValueError(f"board.points.{name}.xy 超出范围")
 
     # optional display widgets: at most soft check
     widgets = [k for k in ("rangeBar", "constant", "answerBand") if board.get(k)]
@@ -125,12 +144,16 @@ def validate_spec(data: dict) -> dict:
         "conics": len(conics),
         "widgets": widgets,
         "language": lesson.get("language") or "zh-CN",
+        "problemKind": problem_kind,
     }
 
 
 def normalize_for_render(data: dict) -> dict:
     """Ensure steps use content field expected by template."""
     out = {
+        "specVersion": data.get("specVersion"),
+        "skillId": data.get("skillId"),
+        "problemKind": data.get("problemKind"),
         "lesson": dict(data.get("lesson") or {}),
         "steps": [],
         "board": dict(data.get("board") or {}),

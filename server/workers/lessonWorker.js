@@ -47,6 +47,18 @@ function buildTitle(job) {
   return parts.join(' · ');
 }
 
+function aiStageName(stage = '') {
+  const text = String(stage);
+  if (/命中|路由|skill/i.test(text)) return 'routing';
+  if (/生成.*Spec|LLM/i.test(text)) return 'generating_spec';
+  if (/分子库|扩展分子/i.test(text)) return 'extending_molecules';
+  if (/校验|validate/i.test(text)) return 'validating';
+  if (/修复|repair/i.test(text)) return 'repairing';
+  if (/渲染|render/i.test(text)) return 'rendering';
+  if (/注册课件|persist/i.test(text)) return 'persisting';
+  return text || 'queued';
+}
+
 async function processAiJob(job) {
   const controller = new AbortController();
   const cancelWatcher = setInterval(async () => {
@@ -66,7 +78,7 @@ async function processAiJob(job) {
 
     const pythonBin = workerConfig.python_bin || process.env.PYTHON_BIN || 'python3';
     const onProgress = async ({ progress, currentStage }) => {
-      await updateJobProgress(job.id, { progress, currentStage, workerToken: job.workerToken });
+      await updateJobProgress(job.id, { progress, currentStage: aiStageName(currentStage), workerToken: job.workerToken });
     };
 
     let result;
@@ -100,7 +112,7 @@ async function processAiJob(job) {
       error_code: ''
     });
 
-    await updateJobProgress(job.id, { progress: 90, currentStage: '注册课件', workerToken: job.workerToken });
+    await updateJobProgress(job.id, { progress: 90, currentStage: 'persisting', workerToken: job.workerToken });
     const stat = fs.statSync(outputPath);
     const title = result.title || buildTitle({ ...job, skillId: result.skillId, problemType: result.problemType });
     const existing = await getLessonByJobId(job.id);

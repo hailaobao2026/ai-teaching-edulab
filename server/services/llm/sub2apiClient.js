@@ -99,6 +99,7 @@ export async function sub2apiFetch(path, { method = 'GET', body, config, signal 
         err.code = signal?.aborted ? 'SUB2API_ABORTED' : 'SUB2API_TIMEOUT';
         lastError = err;
       }
+      if (lastError?.code === 'SUB2API_ABORTED') throw lastError;
       if (error.code === 'SUB2API_NOT_CONFIGURED') throw error;
       if (attempt >= cfg.maxRetries) break;
       await sleep(300 * (attempt + 1));
