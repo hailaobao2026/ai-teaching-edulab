@@ -380,7 +380,7 @@ sub2api (chat/vision)    @wy51ai/edulab skills
 
 欢迎加入技术交流群，分享你的 Skills 和使用心得：
 
-![技术交流群](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Obsidian/image-20261024100147846.png)
+![技术交流群](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Obsidian/Screenshot_20261029_102501_com.tencent.mm.jpg)
 
 ## 作者联系
 
